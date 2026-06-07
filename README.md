@@ -15,7 +15,7 @@ music-hackathon/
 │   ├── core.py              # Tempo, musical intentions, and state machine
 │   ├── performer.py         # Performer camera, MIDI, Reaper, and orchestration
 │   ├── conductor.py         # Calibration and three-mode conductor UI
-│   └── mrt2_mock.py         # Visual mock of the custom MRT2 OSC bridge
+│   └── mrt2_mock.py         # Visual mock of MRT2 parameter mappings
 ├── docs/                    # Design and hardware/software test guides
 ├── models/                  # MediaPipe model assets
 ├── scripts/                 # Optional setup utilities
@@ -39,22 +39,21 @@ Laptop Camera -> ensemble.py
 
 MIDI Keyboard -> ensemble.py
   -> GestureInstrument Note On/Off
-  -> MRT2 Jam note conditioning
+  -> Reaper track containing Google: MRT2 AU
 
 iPhone Camera -> gesture_midi.py
   -> Personal calibration
   -> Beginner / Assisted / Expert musical intentions
   -> 127.0.0.1:9000
   -> ensemble.py state machine
-  -> 127.0.0.1:9100
-  -> Custom MRT2 Jam OSC Bridge
+  -> Reaper OSC 127.0.0.1:8000
+  -> MRT2 AU automation parameters
 ```
 
-The stock MRT2 Jam MIDI input only handles Note On and Note Off. It does not process the previously used CC20-25 controls, MIDI Clock, or Start/Stop messages. Therefore:
-
-- Performer notes can still enter stock Jam through `GestureInstrument`.
-- Conductor parameters require the custom Jam OSC Bridge.
-- Until that bridge is implemented, use `mrt2_mock.py` to test the complete interaction.
+The performance setup uses the **Google: MRT2 AUv3 instrument hosted inside
+Reaper**. MRT2 Jam is no longer used. Performer notes enter the MRT2 track
+through `GestureInstrument`; conductor parameters are sent to Reaper's FX
+automation OSC addresses.
 
 ## Installation
 
@@ -89,17 +88,11 @@ iPhone Continuity Camera            -> Conductor
 
 ## Test Run
 
-### 1. Start the MRT2 Mock Backend
+### 1. Start Reaper with MRT2 AU
 
-Terminal 1:
-
-```bash
-cd ~/Desktop/music-hackathon
-source .venv/bin/activate
-python mrt2_mock.py
-```
-
-It displays `temperature`, `top_k`, the three CFG values, style, and structural actions.
+Install and register `MRT2 (AU).app`, set Reaper to 48 kHz, and load
+**AUv3i: Google: MRT2** as the first FX on track 2. Set that track's MIDI input
+to `GestureInstrument`, enable record monitoring, and keep the track unmuted.
 
 ### 2. Start the Performer Controller
 
@@ -130,6 +123,20 @@ For Reaper playback, configure a local OSC control surface on receive port
 project position `1.1.00`. On the fifth nod, the system stops Reaper, returns
 to the project start, writes the smoothed BPM into Reaper's visible tempo
 field, and starts playback.
+
+The default MRT2 location is Reaper track 2, FX slot 1. Override it when
+needed:
+
+```bash
+python ensemble.py --mrt2-track 3 --mrt2-fx 1
+```
+
+For parameter testing without the AU:
+
+```bash
+python mrt2_mock.py
+python ensemble.py --mrt2-backend mock
+```
 
 ### 3. Start the Conductor Interface
 
@@ -296,25 +303,13 @@ Conductor intentions:
 /conductor/tracking
 ```
 
-Custom Jam Bridge:
+MRT2 AU through Reaper:
 
 ```text
-127.0.0.1:9100
+127.0.0.1:8000
 
-/mrt2/temperature
-/mrt2/top_k
-/mrt2/cfg_musiccoca
-/mrt2/cfg_notes
-/mrt2/cfg_drums
-/mrt2/style
-/mrt2/section
-/mrt2/volume
-/mrt2/volume_ramp
-/mrt2/bypass
-/mrt2/action/prepare
-/mrt2/action/start
-/mrt2/action/hold
-/mrt2/action/stop_queued
+/track/TRACK/fx/FX/fxparam/PARAM/value
+/track/TRACK/fx/FX/bypass
 ```
 
 ## Automated Tests

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Opens Audio MIDI Setup for the MRT2 Jam fallback configuration.
+# Opens Audio MIDI Setup for the Reaper + MRT2 AU configuration.
 #
 # Option A (automatic): ensemble.py creates the GestureInstrument and
 # MusicianClock virtual ports. No manual setup is normally needed.
@@ -21,8 +21,9 @@ echo "3. Check 'Device is online'"
 echo "4. Click '+' to add a bus named 'GestureInstrument'"
 echo "5. Click Apply"
 echo ""
-echo "Then in MRT2 Jam:"
-echo "  Settings > MIDI Input > select 'GestureInstrument' or 'IAC Driver Bus 1'"
+echo "Then in Reaper, on the track containing Google: MRT2:"
+echo "  Input: MIDI > GestureInstrument (or IAC Driver Bus 1) > All Channels"
+echo "  Enable record monitoring."
 echo ""
 echo "Or just run:  python ensemble.py"
 echo "(The ensemble opens GestureInstrument and MusicianClock automatically.)"

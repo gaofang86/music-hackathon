@@ -147,13 +147,14 @@ tempo, and the prepared drum arrangement must be audible immediately.
 
 ## 10. MRT2 Setup
 
-### Interaction Test Without Custom MRT2
+### Interaction Test Without MRT2 AU
 
 Use the included visual mock:
 
 ```bash
 source .venv/bin/activate
 python mrt2_mock.py
+python ensemble.py --mrt2-backend mock
 ```
 
 The mock listens on `127.0.0.1:9100` and displays:
@@ -167,28 +168,26 @@ The mock listens on `127.0.0.1:9100` and displays:
 - Section
 - Structural actions
 
-### Real MRT2 Test
+### Real MRT2 AU Test
 
-The stock MRT2 Jam MIDI input only handles Note On and Note Off.
-
-1. Select `GestureInstrument` as the MIDI input in MRT2 Jam.
-2. Use the custom MRT2 Jam build with the local OSC bridge on port `9100` for
-   parameter and transport control.
-3. Do not expect stock Jam to respond to the old CC20-25 control scheme.
+1. Move `MRT2 (AU).app` to `/Applications` before opening it.
+2. Open it once to register the embedded AUv3 extension.
+3. Set Reaper's sample rate to 48,000 Hz.
+4. Insert **AUv3i: Google: MRT2** as FX slot 1 on track 2.
+5. Set the track MIDI input to `GestureInstrument`, All Channels.
+6. Enable record monitoring and keep the track unmuted.
+7. Run `ensemble.py` with its default `--mrt2-backend au`.
+8. Use `--mrt2-track` and `--mrt2-fx` for another plugin location.
 
 ## 11. Start the System
 
-Open three terminals.
+Open Reaper, then use two terminals.
 
-### Terminal 1: MRT2 Backend Test
+### Reaper
 
-```bash
-cd ~/Desktop/music-hackathon
-source .venv/bin/activate
-python mrt2_mock.py
-```
+Open the prepared 48 kHz project containing the guide drum track and MRT2 AU.
 
-### Terminal 2: Performer Controller
+### Terminal 1: Performer Controller
 
 ```bash
 cd ~/Desktop/music-hackathon
@@ -206,7 +205,7 @@ python ensemble.py --midi-port "KeyLab"
 Choose the performer camera from the startup menu. For a fixed show setup, add
 `--camera PERFORMER_CAMERA`.
 
-### Terminal 3: Conductor UI
+### Terminal 2: Conductor UI
 
 ```bash
 cd ~/Desktop/music-hackathon
@@ -335,13 +334,13 @@ Verify:
 1. Start another active section.
 2. Press `E`.
 3. Confirm immediate `EMERGENCY STOP`.
-4. Confirm the mock receives volume `-60 dB` and bypass `1`.
+4. Confirm the MRT2 AU instance in Reaper becomes bypassed.
 
 ## 19. MIDI Prompt Test
 
-1. Select `GestureInstrument` in MRT2 Jam.
+1. Select `GestureInstrument` as the input of the Reaper MRT2 AU track.
 2. Play the MIDI keyboard.
-3. Confirm MRT2 Jam displays the active notes.
+3. Confirm MRT2 AU displays the active notes and generates audio.
 4. Confirm only Note On and Note Off are forwarded.
 5. Confirm conductor actions do not create MIDI notes.
 

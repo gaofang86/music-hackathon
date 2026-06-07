@@ -14,7 +14,17 @@ implementation detail and must not appear in the default interface.
 
 ## 2. Deployment Decision
 
-### Recommended: a fork of the official MRT2 Jam app
+### Current deployment: MRT2 AUv3 hosted in Reaper
+
+The performance build no longer uses MRT2 Jam. Reaper hosts
+**AUv3i: Google: MRT2** at 48 kHz. Performer MIDI notes enter the MRT2 track
+through the local `GestureInstrument` virtual MIDI port. Conductor parameters
+are mapped to the AU's automatable FX parameters through Reaper OSC.
+
+The former Jam-fork design below is retained only as historical rationale and
+is not part of the current deployment.
+
+### Historical alternative: a fork of the official MRT2 Jam app
 
 Add a loopback-only OSC bridge beside Jam's existing `RealtimeRunner`.
 

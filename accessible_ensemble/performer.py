@@ -48,7 +48,7 @@ class ControlEvent:
 
 
 class MidiOutputs:
-    """MIDI paths that stock Reaper and MRT2 Jam actually consume."""
+    """MIDI paths consumed by Reaper and the hosted MRT2 AU."""
 
     def __init__(self):
         self.reaper = rtmidi.MidiOut()
@@ -138,7 +138,7 @@ class SharedClock(threading.Thread):
 
 
 class PerformerMidiInput(threading.Thread):
-    SKIP_NAMES = ("GestureInstrument", "MusicianClock", "MRT2 - Jam")
+    SKIP_NAMES = ("GestureInstrument", "MusicianClock")
 
     def __init__(self, outputs: MidiOutputs, requested_port: str | None):
         super().__init__(daemon=True)
@@ -179,13 +179,13 @@ class PerformerMidiInput(threading.Thread):
         self.midiin.close_port()
 
 
-class Mrt2OscAdapter:
-    """Contract for the custom Jam fork; stock Jam does not implement it."""
+class Mrt2MockAdapter:
+    """Legacy OSC mock used to inspect conductor-to-MRT2 mappings."""
 
     def __init__(self, port: int):
         self.client = udp_client.SimpleUDPClient("127.0.0.1", port)
         self._last_parameters = None
-        print(f"[MRT2 ADAPTER] Custom Jam OSC expected at 127.0.0.1:{port}")
+        print(f"[MRT2 MOCK] OSC monitor expected at 127.0.0.1:{port}")
 
     def prepare(self) -> None:
         self.client.send_message("/mrt2/action/prepare", 1)
@@ -221,10 +221,78 @@ class Mrt2OscAdapter:
         self._last_parameters = parameters
 
 
+class Mrt2AuAdapter:
+    """Control an MRT2 AU instance hosted on a Reaper track."""
+
+    PARAMETER_INDEX = {
+        "temperature": 1,
+        "top_k": 2,
+        "cfg_musiccoca": 4,
+        "cfg_notes": 5,
+        "cfg_drums": 49,
+    }
+
+    def __init__(self, port: int, track: int, fx: int):
+        self.client = udp_client.SimpleUDPClient("127.0.0.1", port)
+        self.track = track
+        self.fx = fx
+        self._last_parameters = None
+        print(
+            f"[MRT2 AU] Reaper track {track}, FX {fx}, "
+            f"OSC 127.0.0.1:{port}"
+        )
+
+    @staticmethod
+    def _normalized(value: float, minimum: float, maximum: float) -> float:
+        return min(1.0, max(0.0, (value - minimum) / (maximum - minimum)))
+
+    def _parameter(self, index: int, value: float) -> None:
+        self.client.send_message(
+            f"/track/{self.track}/fx/{self.fx}/fxparam/{index}/value",
+            value,
+        )
+
+    def _bypass(self, enabled: bool) -> None:
+        self.client.send_message(
+            f"/track/{self.track}/fx/{self.fx}/bypass",
+            int(enabled),
+        )
+
+    def prepare(self) -> None:
+        self._bypass(False)
+
+    def start(self) -> None:
+        self._bypass(False)
+
+    def normal_stop(self, _bar_duration: float) -> None:
+        self._bypass(True)
+
+    def hold(self, _enabled: bool) -> None:
+        pass
+
+    def emergency_stop(self) -> None:
+        self._bypass(True)
+
+    def update(self, intent) -> None:
+        parameters = intent_to_mrt2(intent)
+        if parameters == self._last_parameters:
+            return
+        values = {
+            "temperature": self._normalized(parameters.temperature, 0.0, 3.0),
+            "top_k": self._normalized(parameters.top_k, 1.0, 1024.0),
+            "cfg_musiccoca": self._normalized(parameters.cfg_musiccoca, 0.0, 5.0),
+            "cfg_notes": self._normalized(parameters.cfg_notes, 0.0, 5.0),
+            "cfg_drums": self._normalized(parameters.cfg_drums, 0.0, 5.0),
+        }
+        for name, value in values.items():
+            self._parameter(self.PARAMETER_INDEX[name], value)
+        self._last_parameters = parameters
+
+
 class StructuralScheduler(threading.Thread):
     """Commit structural actions independently of camera frame rate."""
 
-    def __init__(self, adapter: Mrt2OscAdapter, events: queue.Queue[ControlEvent]):
+    def __init__(self, adapter, events: queue.Queue[ControlEvent]):
         super().__init__(daemon=True)
         self.adapter = adapter
         self.events = events
@@ -380,7 +448,10 @@ def parse_args():
     parser.add_argument("--list-cameras", action="store_true")
     parser.add_argument("--control-port", type=int, default=9000)
     parser.add_argument("--feedback-port", type=int, default=9002)
+    parser.add_argument("--mrt2-backend", choices=("au", "mock"), default="au")
     parser.add_argument("--mrt2-port", type=int, default=9100)
+    parser.add_argument("--mrt2-track", type=int, default=2)
+    parser.add_argument("--mrt2-fx", type=int, default=1)
     parser.add_argument("--reaper-port", type=int, default=8000)
     parser.add_argument("--midi-port")
     parser.add_argument("--smoothing", type=float, default=0.65)
@@ -405,7 +476,14 @@ def main() -> None:
     clock = SharedClock(outputs)
     clock.start()
     performer = PerformerMidiInput(outputs, args.midi_port)
-    mrt2 = Mrt2OscAdapter(args.mrt2_port)
+    if args.mrt2_backend == "mock":
+        mrt2 = Mrt2MockAdapter(args.mrt2_port)
+    else:
+        mrt2 = Mrt2AuAdapter(
+            port=args.reaper_port,
+            track=args.mrt2_track,
+            fx=args.mrt2_fx,
+        )
     scheduler = StructuralScheduler(mrt2, events)
     reaper = ReaperOsc(args.reaper_port)
     feedback = udp_client.SimpleUDPClient("127.0.0.1", args.feedback_port)
