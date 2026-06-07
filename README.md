@@ -119,7 +119,13 @@ With a MIDI keyboard:
 python ensemble.py --camera 0 --midi-port "Keyboard Name"
 ```
 
-By default, the performer nods five times to establish the tempo. The final nod is beat 1 of the first bar.
+By default, the performer nods five times to establish the tempo. The final nod is beat 1 of the first bar. Tempo refinement continues through the twelfth valid nod. The twelfth nod sets the final smoothed BPM; all later nods are ignored so ordinary head movement cannot keep changing Reaper's tempo. Press `R` in the performer window to reset the session and learn a new tempo.
+
+For Reaper playback, configure a local OSC control surface on receive port
+`8000` using the default OSC pattern. Prepare an audible drum arrangement at
+project position `1.1.00`. On the fifth nod, the system stops Reaper, returns
+to the project start, writes the smoothed BPM into Reaper's visible tempo
+field, and starts playback.
 
 ### 3. Start the Conductor Interface
 
@@ -142,6 +148,12 @@ python gesture_midi.py --camera 1 --input body
 The system does not infer a participant's abilities from a failed hand detection. For formal use, explicitly select the participant's preferred input method.
 
 ## Three Conductor Modes
+
+The conductor window includes a clickable mode dropdown for **Beginner**,
+**Assisted**, and **Expert**. Keyboard shortcuts `1`, `2`, and `3` remain
+available. The camera view overlays detected hand skeletons, facial features,
+and body pose connections regardless of which input source currently controls
+the musical parameters.
 
 ### Beginner
 

@@ -292,17 +292,31 @@ class StructuralScheduler(threading.Thread):
 
 
 class ReaperOsc:
+    GO_TO_PROJECT_START = 40042
+    TRANSPORT_PLAY = 1007
+    TRANSPORT_STOP = 1016
+
     def __init__(self, port: int):
         self.client = udp_client.SimpleUDPClient("127.0.0.1", port)
+
+    def action(self, command_id: int) -> None:
+        self.client.send_message(f"/action/{command_id}", 1.0)
 
     def tempo(self, bpm: float) -> None:
         self.client.send_message("/tempo/raw", bpm)
 
     def play(self) -> None:
-        self.client.send_message("/transport/play", 1.0)
+        self.action(self.TRANSPORT_PLAY)
 
     def stop(self) -> None:
-        self.client.send_message("/transport/stop", 1.0)
+        self.action(self.TRANSPORT_STOP)
+
+    def start_project(self, bpm: float) -> None:
+        """Start the prepared Reaper drum arrangement at the fifth nod."""
+        self.stop()
+        self.action(self.GO_TO_PROJECT_START)
+        self.tempo(bpm)
+        self.play()
 
 
 def start_control_server(events: queue.Queue[ControlEvent], port: int):
@@ -365,13 +379,18 @@ def parse_args():
     parser.add_argument("--midi-port")
     parser.add_argument("--smoothing", type=float, default=0.65)
     parser.add_argument("--nods-to-start", type=int, default=5)
+    parser.add_argument("--nods-to-lock", type=int, default=12)
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
     events: queue.Queue[ControlEvent] = queue.Queue()
-    controller = EnsembleController(args.nods_to_start, args.smoothing)
+    controller = EnsembleController(
+        nods_to_start=args.nods_to_start,
+        nods_to_lock=args.nods_to_lock,
+        smoothing=args.smoothing,
+    )
     outputs = MidiOutputs()
     clock = SharedClock(outputs)
     clock.start()
@@ -388,7 +407,10 @@ def main() -> None:
         raise RuntimeError(f"cannot open laptop camera {args.camera}")
 
     frame_timestamp_ms = 0
-    print(f"[READY] Performer nods {args.nods_to_start} times to establish tempo.")
+    print(
+        f"[READY] Performer nods {args.nods_to_start} times to start; "
+        f"tempo locks after nod {args.nods_to_lock}."
+    )
     try:
         while True:
             ok, frame = cap.read()
@@ -404,13 +426,26 @@ def main() -> None:
                 nose = result.face_landmarks[0][NOSE_TIP_IDX]
                 detected, _ = nod_detector.update(nose.y)
                 if detected:
+                    previous_nod_count = controller.nod_count
                     was_waiting = controller.state.transport == TransportState.WAITING
                     state = controller.record_nod(now)
-                    clock.set_bpm(state.bpm)
-                    reaper.tempo(state.bpm)
-                    if was_waiting and state.transport == TransportState.READY:
+                    nod_was_accepted = controller.nod_count != previous_nod_count
+                    if nod_was_accepted:
+                        clock.set_bpm(state.bpm)
+                        reaper.tempo(state.bpm)
+                    if nod_was_accepted and was_waiting and state.transport == TransportState.READY:
                         clock.start_at_bar_head()
-                        reaper.play()
+                        reaper.start_project(state.bpm)
+                        print(
+                            f"[REAPER] Start nod {args.nods_to_start}: "
+                            f"tempo {state.bpm:.1f} BPM, "
+                            "project returned to 1.1.00, playback started."
+                        )
+                    if controller.nod_count == args.nods_to_lock and previous_nod_count < args.nods_to_lock:
+                        print(
+                            f"[TEMPO] Locked at {state.bpm:.1f} BPM after "
+                            f"nod {args.nods_to_lock}; later nods are ignored."
+                        )
                 cv2.circle(
                     frame,
                     (int(nose.x * frame.shape[1]), int(nose.y * frame.shape[0])),
@@ -483,7 +518,11 @@ def main() -> None:
 
             cv2.rectangle(frame, (0, 0), (frame.shape[1], 78), (0, 0, 0), -1)
             line1 = f"{state.transport.value}  BPM {state.bpm:.1f}  BEAT {beat or '-'}"
-            line2 = f"MODE {state.mode.value.upper()}  NODS {controller.nod_count}/{args.nods_to_start}"
+            tempo_status = "TEMPO LOCKED" if controller.tempo_locked else "TEMPO LEARNING"
+            line2 = (
+                f"MODE {state.mode.value.upper()}  "
+                f"NODS {controller.nod_count}/{args.nods_to_lock}  {tempo_status}"
+            )
             cv2.putText(frame, line1, (14, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (90, 255, 120), 2)
             cv2.putText(frame, line2, (14, 62), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (220, 220, 220), 2)
             cv2.imshow("Performer Tempo and Ensemble State", frame)

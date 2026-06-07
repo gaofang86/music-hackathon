@@ -125,13 +125,27 @@ MIDI keyboard: ______________________________
 ## 9. Reaper Setup
 
 1. Open Reaper.
-2. Enable `MusicianClock` under MIDI input devices.
-3. Configure Reaper to follow external MIDI Clock from `MusicianClock`.
-4. Set the time signature to 4/4.
-5. Create a guide drum track.
-6. Set its input to `MusicianClock`, MIDI channel 10.
-7. Arm monitoring for the guide drum track.
-8. Optionally configure a local Reaper OSC surface on port `8000`.
+2. Open **Preferences > Control/OSC/web**.
+3. Add an OSC control surface using the default OSC pattern.
+4. Set its receive port to `8000` and local IP to `127.0.0.1`.
+5. Set the project time signature to 4/4.
+6. Create or import the audible guide-drum arrangement at project position
+   `1.1.00`.
+7. Insert a drum instrument or use an audio drum loop, then confirm it produces
+   sound when Reaper's Play button is pressed.
+8. Keep the drum track unmuted and route it to the correct audio output.
+9. `MusicianClock` may remain enabled for clock and generated guide-note
+   experiments, but the required fifth-nod test plays the arrangement already
+   written in Reaper.
+
+On the fifth detected nod, the project sends Reaper these operations:
+
+```text
+Stop -> Go to project start -> Set visible project BPM -> Play
+```
+
+The BPM field in Reaper's transport bar must change to the detected smoothed
+tempo, and the prepared drum arrangement must be audible immediately.
 
 ## 10. MRT2 Setup
 
@@ -239,8 +253,11 @@ disability from failed hand detection.
 4. Confirm the displayed BPM is close to the intended tempo.
 5. Confirm Reaper starts its guide drum track.
 6. Confirm the beat display cycles through `1 2 3 4`.
-7. Repeat with `--nods-to-start 4`.
-8. Repeat with deliberately uneven nods and confirm BPM smoothing.
+7. Continue nodding through nod 12 and confirm `TEMPO LOCKED` appears.
+8. Change nod speed after nod 12 and confirm Reaper's BPM no longer changes.
+9. Press `R` and confirm tempo learning starts again from zero.
+10. Repeat with `--nods-to-start 4`.
+11. Repeat with deliberately uneven nods and confirm BPM smoothing.
 
 ## 14. Beginner Mode Test
 
