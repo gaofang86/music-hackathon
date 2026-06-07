@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Visual mock for the custom MRT2 Jam loopback OSC bridge."""
+"""Visual mock for conductor-to-MRT2 parameter mappings."""
 
 from __future__ import annotations
 
@@ -93,7 +93,7 @@ def main():
         while True:
             values, action, last_message = state.snapshot()
             image = np.full((520, 700, 3), (24, 26, 30), dtype=np.uint8)
-            draw_text(image, "MRT2 OSC BRIDGE MOCK", (30, 45), 1.0, (100, 220, 255))
+            draw_text(image, "MRT2 PARAMETER MOCK", (30, 45), 1.0, (100, 220, 255))
             draw_text(image, f"ACTION: {action}", (30, 92), 0.8, (100, 255, 140))
             y = 145
             for name, value in values.items():

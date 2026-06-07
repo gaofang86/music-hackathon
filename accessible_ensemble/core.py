@@ -242,13 +242,17 @@ class EnsembleController:
     def __init__(
         self,
         nods_to_start: int = 5,
+        nods_to_lock: int = 12,
         smoothing: float = 0.65,
         default_bpm: float = 120.0,
         mode: InteractionMode = InteractionMode.BEGINNER,
     ):
         if nods_to_start < 2:
             raise ValueError("nods_to_start must be at least 2")
+        if nods_to_lock < nods_to_start:
+            raise ValueError("nods_to_lock must be at least nods_to_start")
         self.nods_to_start = nods_to_start
+        self.nods_to_lock = nods_to_lock
         self.tempo = WeightedTempoSmoother(
             smoothing=smoothing,
             default_bpm=default_bpm,
@@ -257,7 +261,13 @@ class EnsembleController:
         self.nod_count = 0
         self.state = EnsembleState(bpm=default_bpm, mode=mode)
 
+    @property
+    def tempo_locked(self) -> bool:
+        return self.nod_count >= self.nods_to_lock
+
     def record_nod(self, timestamp: float) -> EnsembleState:
+        if self.tempo_locked:
+            return self.state
         self.nod_count += 1
         bpm = self.tempo.add_beat(timestamp)
         if self.state.transport == TransportState.WAITING:

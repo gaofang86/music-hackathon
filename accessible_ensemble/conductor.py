@@ -17,6 +17,7 @@ import mediapipe as mp
 import numpy as np
 from pythonosc import dispatcher, osc_server, udp_client
 
+from .cameras import discover_cameras, open_camera, print_camera_list, resolve_camera
 from .core import InteractionMode, clamp
 
 
@@ -31,6 +32,38 @@ LEFT_SHOULDER, RIGHT_SHOULDER = 11, 12
 LEFT_HIP, RIGHT_HIP = 23, 24
 LEFT_WRIST, RIGHT_WRIST = 15, 16
 POSE_POINTS = (11, 12, 23, 24, 15, 16)
+HAND_CONNECTIONS = (
+    (0, 1), (1, 2), (2, 3), (3, 4),
+    (0, 5), (5, 6), (6, 7), (7, 8),
+    (5, 9), (9, 10), (10, 11), (11, 12),
+    (9, 13), (13, 14), (14, 15), (15, 16),
+    (13, 17), (17, 18), (18, 19), (19, 20), (0, 17),
+)
+POSE_CONNECTIONS = (
+    (0, 1), (1, 2), (2, 3), (3, 7),
+    (0, 4), (4, 5), (5, 6), (6, 8),
+    (9, 10), (11, 12), (11, 13), (13, 15),
+    (15, 17), (15, 19), (15, 21), (17, 19),
+    (12, 14), (14, 16), (16, 18), (16, 20),
+    (16, 22), (18, 20), (11, 23), (12, 24),
+    (23, 24), (23, 25), (24, 26), (25, 27),
+    (26, 28), (27, 29), (28, 30), (29, 31),
+    (30, 32), (27, 31), (28, 32),
+)
+FACE_PATHS = (
+    (10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288,
+     397, 365, 379, 378, 400, 377, 152, 148, 176, 149, 150, 136,
+     172, 58, 132, 93, 234, 127, 162, 21, 54, 103, 67, 109, 10),
+    (33, 7, 163, 144, 145, 153, 154, 155, 133, 173, 157, 158, 159,
+     160, 161, 246, 33),
+    (263, 249, 390, 373, 374, 380, 381, 382, 362, 398, 384, 385,
+     386, 387, 388, 466, 263),
+    (70, 63, 105, 66, 107),
+    (336, 296, 334, 293, 300),
+    (61, 146, 91, 181, 84, 17, 314, 405, 321, 375, 291, 308, 324,
+     318, 402, 317, 14, 87, 178, 88, 95, 78, 61),
+    (168, 6, 197, 195, 5, 4, 1, 19, 94, 2),
+)
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MODEL_DIR = os.path.join(PROJECT_ROOT, "models")
@@ -302,6 +335,67 @@ def extract_signals(source, hands_result, face_result, pose_result, previous):
     return signals
 
 
+def landmark_point(landmark, width, height):
+    return int(landmark.x * width), int(landmark.y * height)
+
+
+def draw_connections(frame, landmarks, connections, color, thickness=2):
+    height, width = frame.shape[:2]
+    for start, end in connections:
+        if start >= len(landmarks) or end >= len(landmarks):
+            continue
+        cv2.line(
+            frame,
+            landmark_point(landmarks[start], width, height),
+            landmark_point(landmarks[end], width, height),
+            color,
+            thickness,
+            cv2.LINE_AA,
+        )
+
+
+def draw_path(frame, landmarks, path, color, thickness=1):
+    draw_connections(
+        frame,
+        landmarks,
+        tuple(zip(path, path[1:])),
+        color,
+        thickness,
+    )
+
+
+def draw_tracking_overlay(frame, hands_result, face_result, pose_result):
+    height, width = frame.shape[:2]
+    if pose_result.pose_landmarks:
+        pose = pose_result.pose_landmarks[0]
+        draw_connections(frame, pose, POSE_CONNECTIONS, (255, 170, 70), 2)
+        for landmark in pose:
+            cv2.circle(
+                frame,
+                landmark_point(landmark, width, height),
+                3,
+                (255, 220, 130),
+                -1,
+                cv2.LINE_AA,
+            )
+    if face_result.face_landmarks:
+        face = face_result.face_landmarks[0]
+        for path in FACE_PATHS:
+            draw_path(frame, face, path, (90, 230, 255), 1)
+    if hands_result.hand_landmarks:
+        for hand in hands_result.hand_landmarks:
+            draw_connections(frame, hand, HAND_CONNECTIONS, (90, 255, 130), 2)
+            for landmark in hand:
+                cv2.circle(
+                    frame,
+                    landmark_point(landmark, width, height),
+                    3,
+                    (180, 255, 190),
+                    -1,
+                    cv2.LINE_AA,
+                )
+
+
 def draw_text(image, text, position, scale=0.55, color=(235, 235, 235), thickness=1):
     cv2.putText(image, text, position, cv2.FONT_HERSHEY_SIMPLEX, scale, (0, 0, 0), thickness + 3)
     cv2.putText(image, text, position, cv2.FONT_HERSHEY_SIMPLEX, scale, color, thickness)
@@ -313,8 +407,54 @@ def draw_bar(panel, label, value, y, color):
     cv2.rectangle(panel, (24, y + 10), (24 + int(352 * clamp(value)), y + 30), color, -1)
 
 
+def draw_mode_dropdown(panel, mode, dropdown_open):
+    left, top, width, row_height = 20, 48, 220, 32
+    cv2.rectangle(panel, (left, top), (left + width, top + row_height), (52, 56, 65), -1)
+    cv2.rectangle(panel, (left, top), (left + width, top + row_height), (120, 150, 180), 1)
+    draw_text(panel, mode.value.title(), (left + 12, top + 22), 0.5, (245, 245, 245), 1)
+    cv2.polylines(
+        panel,
+        [np.array([
+            [left + width - 24, top + 12],
+            [left + width - 16, top + 20],
+            [left + width - 8, top + 12],
+        ])],
+        False,
+        (220, 220, 220),
+        2,
+    )
+    if not dropdown_open:
+        return
+    for index, item in enumerate(InteractionMode):
+        row_top = top + row_height * (index + 1)
+        color = (70, 92, 112) if item == mode else (42, 46, 54)
+        cv2.rectangle(
+            panel,
+            (left, row_top),
+            (left + width, row_top + row_height),
+            color,
+            -1,
+        )
+        cv2.rectangle(
+            panel,
+            (left, row_top),
+            (left + width, row_top + row_height),
+            (100, 110, 125),
+            1,
+        )
+        draw_text(
+            panel,
+            item.value.title(),
+            (left + 12, row_top + 22),
+            0.5,
+            (245, 245, 245),
+            1,
+        )
+
+
 def render_ui(
-    frame, mode, source, values, feedback, calibration, style_index, section_index
+    frame, mode, source, values, feedback, calibration, style_index,
+    section_index, dropdown_open
 ):
     height = max(620, frame.shape[0])
     camera = cv2.resize(frame, (int(frame.shape[1] * height / frame.shape[0]), height))
@@ -328,7 +468,7 @@ def render_ui(
         "EMERGENCY_STOP": (60, 60, 255),
     }.get(state, (190, 190, 190))
     draw_text(panel, "CONDUCTOR", (24, 38), 0.9, (255, 255, 255), 2)
-    draw_text(panel, f"{mode.value.upper()}  |  INPUT: {source.upper()}", (24, 67), 0.52, (160, 200, 255))
+    draw_text(panel, f"INPUT: {source.upper()}", (258, 70), 0.45, (160, 200, 255))
     cv2.rectangle(panel, (20, 84), (400, 142), (40, 43, 49), -1)
     draw_text(panel, state.replace("_", " "), (34, 120), 0.8, state_color, 2)
     if feedback["countdown"] >= 0:
@@ -361,14 +501,20 @@ def render_ui(
     if calibration_message:
         cv2.rectangle(panel, (16, height - 104), (404, height - 58), (45, 70, 100), -1)
         draw_text(panel, calibration_message, (26, height - 76), 0.47, (255, 255, 255), 2)
-    draw_text(panel, "1/2/3 mode  C calibrate  SPACE hold/resume", (20, height - 34), 0.38, (170, 170, 175))
+    draw_text(panel, "Mode menu or 1/2/3  C calibrate  SPACE hold", (20, height - 34), 0.38, (170, 170, 175))
     draw_text(panel, "S start  X end  E emergency  [/] style  N section", (20, height - 15), 0.38, (170, 170, 175))
+    draw_mode_dropdown(panel, mode, dropdown_open)
     return np.hstack([camera, panel])
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--camera", type=int, default=1)
+    parser.add_argument(
+        "--camera",
+        default="select",
+        help="camera index, or 'select' to choose from detected cameras",
+    )
+    parser.add_argument("--list-cameras", action="store_true")
     parser.add_argument("--mode", choices=[mode.value for mode in InteractionMode], default="beginner")
     parser.add_argument("--input", choices=("auto", "hands", "face", "body"), default="auto")
     parser.add_argument("--profile", default="default")
@@ -379,6 +525,10 @@ def parse_args():
 
 def main():
     args = parse_args()
+    if args.list_cameras:
+        print_camera_list(discover_cameras())
+        return
+    camera_index = resolve_camera(args.camera, "conductor")
     control = udp_client.SimpleUDPClient("127.0.0.1", args.control_port)
     feedback_state = FeedbackState()
     feedback_server = start_feedback_server(feedback_state, args.feedback_port)
@@ -398,9 +548,9 @@ def main():
     face = mp_vision.FaceLandmarker.create_from_options(mp_vision.FaceLandmarkerOptions(base_options=mp_python.BaseOptions(model_asset_path=face_model), running_mode=running, num_faces=1))
     pose = mp_vision.PoseLandmarker.create_from_options(mp_vision.PoseLandmarkerOptions(base_options=mp_python.BaseOptions(model_asset_path=pose_model), running_mode=running))
 
-    cap = cv2.VideoCapture(args.camera)
+    cap = open_camera(camera_index)
     if not cap.isOpened():
-        raise RuntimeError(f"cannot open iPhone camera {args.camera}")
+        raise RuntimeError(f"cannot open conductor camera {camera_index}")
 
     previous = {}
     stop_gate = HoldGate(0.8)
@@ -420,7 +570,6 @@ def main():
         "style_commitment": 0.4,
         "tracking": False,
     }
-
     # Listen for performer energy floor on port 9004
     _perf_disp = dispatcher.Dispatcher()
     def _recv_floor(_addr, value):
@@ -430,6 +579,31 @@ def main():
     _perf_server = osc_server.ThreadingOSCUDPServer(("127.0.0.1", 9004), _perf_disp)
     threading.Thread(target=_perf_server.serve_forever, daemon=True).start()
 
+    ui_state = {
+        "mode": mode,
+        "dropdown_open": False,
+        "panel_x": 0,
+    }
+
+    def on_mouse(event, x, y, _flags, _param):
+        if event != cv2.EVENT_LBUTTONDOWN:
+            return
+        local_x = x - ui_state["panel_x"]
+        left, top, width, row_height = 20, 48, 220, 32
+        if left <= local_x <= left + width and top <= y <= top + row_height:
+            ui_state["dropdown_open"] = not ui_state["dropdown_open"]
+            return
+        if ui_state["dropdown_open"] and left <= local_x <= left + width:
+            index = int((y - top) // row_height) - 1
+            modes = list(InteractionMode)
+            if 0 <= index < len(modes):
+                ui_state["mode"] = modes[index]
+                control.send_message("/conductor/mode", modes[index].value)
+        ui_state["dropdown_open"] = False
+
+    window_name = "Accessible MRT2 Conductor"
+    cv2.namedWindow(window_name)
+    cv2.setMouseCallback(window_name, on_mouse)
     control.send_message("/conductor/mode", mode.value)
 
     try:
@@ -442,15 +616,18 @@ def main():
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
             frame_timestamp_ms += 33
+            hands_result = hands.detect_for_video(image, frame_timestamp_ms)
+            face_result = face.detect_for_video(image, frame_timestamp_ms)
+            pose_result = pose.detect_for_video(image, frame_timestamp_ms)
             raw = extract_signals(
-                source,
-                hands.detect_for_video(image, frame_timestamp_ms),
-                face.detect_for_video(image, frame_timestamp_ms),
-                pose.detect_for_video(image, frame_timestamp_ms),
-                previous,
+                source, hands_result, face_result, pose_result, previous
+            )
+            draw_tracking_overlay(
+                frame, hands_result, face_result, pose_result
             )
             calibration.update(now, raw)
             values["tracking"] = raw.tracking
+            mode = ui_state["mode"]
 
             if raw.tracking and calibration.phase not in ("neutral", "range"):
                 energy = profile.normalize("energy", raw.energy)
@@ -500,13 +677,17 @@ def main():
             display = render_ui(
                 frame, mode, source, values, feedback_state.snapshot(),
                 calibration, style_index, section_index,
+                ui_state["dropdown_open"],
             )
-            cv2.imshow("Accessible MRT2 Conductor", display)
+            ui_state["panel_x"] = display.shape[1] - 420
+            cv2.imshow(window_name, display)
             key = cv2.waitKey(1) & 0xFF
             if key == ord("q"):
                 break
             if key in (ord("1"), ord("2"), ord("3")):
                 mode = list(InteractionMode)[key - ord("1")]
+                ui_state["mode"] = mode
+                ui_state["dropdown_open"] = False
                 control.send_message("/conductor/mode", mode.value)
             elif key == ord("c"):
                 calibration.start(now)

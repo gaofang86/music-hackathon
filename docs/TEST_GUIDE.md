@@ -81,17 +81,13 @@ python -c "import cv2, mediapipe, rtmidi, pythonosc; print('Dependencies OK')"
 
 ## 7. Camera Detection
 
+Confirm the terminal application is enabled under
+**System Settings > Privacy & Security > Camera**.
+
 Run:
 
 ```bash
-python -c '
-import cv2
-for i in range(8):
-    cap = cv2.VideoCapture(i)
-    if cap.isOpened():
-        print("Available camera:", i)
-        cap.release()
-'
+python ensemble.py --list-cameras
 ```
 
 Record the camera numbers:
@@ -101,7 +97,9 @@ Performer camera: ______
 Conductor iPhone camera: ______
 ```
 
-Typical values are `0` for the laptop camera and `1` for the iPhone.
+Camera numbers are not stable across machines. On one machine `0` may be the
+iPhone; on another machine `0` may be the laptop camera. Use the startup menu
+or `--list-cameras` on each computer before assigning roles.
 
 ## 8. MIDI Device Check
 
@@ -125,23 +123,38 @@ MIDI keyboard: ______________________________
 ## 9. Reaper Setup
 
 1. Open Reaper.
-2. Enable `MusicianClock` under MIDI input devices.
-3. Configure Reaper to follow external MIDI Clock from `MusicianClock`.
-4. Set the time signature to 4/4.
-5. Create a guide drum track.
-6. Set its input to `MusicianClock`, MIDI channel 10.
-7. Arm monitoring for the guide drum track.
-8. Optionally configure a local Reaper OSC surface on port `8000`.
+2. Open **Preferences > Control/OSC/web**.
+3. Add an OSC control surface using the default OSC pattern.
+4. Set its receive port to `8000` and local IP to `127.0.0.1`.
+5. Set the project time signature to 4/4.
+6. Create or import the audible guide-drum arrangement at project position
+   `1.1.00`.
+7. Insert a drum instrument or use an audio drum loop, then confirm it produces
+   sound when Reaper's Play button is pressed.
+8. Keep the drum track unmuted and route it to the correct audio output.
+9. `MusicianClock` may remain enabled for clock and generated guide-note
+   experiments, but the required fifth-nod test plays the arrangement already
+   written in Reaper.
+
+On the fifth detected nod, the project sends Reaper these operations:
+
+```text
+Stop -> Go to project start -> Set visible project BPM -> Play
+```
+
+The BPM field in Reaper's transport bar must change to the detected smoothed
+tempo, and the prepared drum arrangement must be audible immediately.
 
 ## 10. MRT2 Setup
 
-### Interaction Test Without Custom MRT2
+### Interaction Test Without MRT2 AU
 
 Use the included visual mock:
 
 ```bash
 source .venv/bin/activate
 python mrt2_mock.py
+python ensemble.py --mrt2-backend mock
 ```
 
 The mock listens on `127.0.0.1:9100` and displays:
@@ -155,50 +168,49 @@ The mock listens on `127.0.0.1:9100` and displays:
 - Section
 - Structural actions
 
-### Real MRT2 Test
+### Real MRT2 AU Test
 
-The stock MRT2 Jam MIDI input only handles Note On and Note Off.
-
-1. Select `GestureInstrument` as the MIDI input in MRT2 Jam.
-2. Use the custom MRT2 Jam build with the local OSC bridge on port `9100` for
-   parameter and transport control.
-3. Do not expect stock Jam to respond to the old CC20-25 control scheme.
+1. Move `MRT2 (AU).app` to `/Applications` before opening it.
+2. Open it once to register the embedded AUv3 extension.
+3. Set Reaper's sample rate to 48,000 Hz.
+4. Insert **AUv3i: Google: MRT2** as FX slot 1 on track 2.
+5. Set the track MIDI input to `GestureInstrument`, All Channels.
+6. Enable record monitoring and keep the track unmuted.
+7. Run `ensemble.py` with its default `--mrt2-backend au`.
+8. Use `--mrt2-track` and `--mrt2-fx` for another plugin location.
 
 ## 11. Start the System
 
-Open three terminals.
+Open Reaper, then use two terminals.
 
-### Terminal 1: MRT2 Backend Test
+### Reaper
 
-```bash
-cd ~/Desktop/music-hackathon
-source .venv/bin/activate
-python mrt2_mock.py
-```
+Open the prepared 48 kHz project containing the guide drum track and MRT2 AU.
 
-### Terminal 2: Performer Controller
+### Terminal 1: Performer Controller
 
 ```bash
 cd ~/Desktop/music-hackathon
 source .venv/bin/activate
 python ensemble.py \
-  --camera PERFORMER_CAMERA \
   --midi-port "MIDI KEYBOARD NAME"
 ```
 
 Example:
 
 ```bash
-python ensemble.py --camera 0 --midi-port "KeyLab"
+python ensemble.py --midi-port "KeyLab"
 ```
 
-### Terminal 3: Conductor UI
+Choose the performer camera from the startup menu. For a fixed show setup, add
+`--camera PERFORMER_CAMERA`.
+
+### Terminal 2: Conductor UI
 
 ```bash
 cd ~/Desktop/music-hackathon
 source .venv/bin/activate
 python gesture_midi.py \
-  --camera IPHONE_CAMERA \
   --mode beginner \
   --input auto \
   --profile test-user
@@ -207,8 +219,11 @@ python gesture_midi.py \
 Example:
 
 ```bash
-python gesture_midi.py --camera 1 --mode beginner --profile test-user
+python gesture_midi.py --mode beginner --profile test-user
 ```
+
+Choose the conductor iPhone camera from the startup menu. For a fixed show
+setup, add `--camera IPHONE_CAMERA`.
 
 ## 12. Calibration Test
 
@@ -239,8 +254,11 @@ disability from failed hand detection.
 4. Confirm the displayed BPM is close to the intended tempo.
 5. Confirm Reaper starts its guide drum track.
 6. Confirm the beat display cycles through `1 2 3 4`.
-7. Repeat with `--nods-to-start 4`.
-8. Repeat with deliberately uneven nods and confirm BPM smoothing.
+7. Continue nodding through nod 12 and confirm `TEMPO LOCKED` appears.
+8. Change nod speed after nod 12 and confirm Reaper's BPM no longer changes.
+9. Press `R` and confirm tempo learning starts again from zero.
+10. Repeat with `--nods-to-start 4`.
+11. Repeat with deliberately uneven nods and confirm BPM smoothing.
 
 ## 14. Beginner Mode Test
 
@@ -316,13 +334,13 @@ Verify:
 1. Start another active section.
 2. Press `E`.
 3. Confirm immediate `EMERGENCY STOP`.
-4. Confirm the mock receives volume `-60 dB` and bypass `1`.
+4. Confirm the MRT2 AU instance in Reaper becomes bypassed.
 
 ## 19. MIDI Prompt Test
 
-1. Select `GestureInstrument` in MRT2 Jam.
+1. Select `GestureInstrument` as the input of the Reaper MRT2 AU track.
 2. Play the MIDI keyboard.
-3. Confirm MRT2 Jam displays the active notes.
+3. Confirm MRT2 AU displays the active notes and generates audio.
 4. Confirm only Note On and Note Off are forwarded.
 5. Confirm conductor actions do not create MIDI notes.
 

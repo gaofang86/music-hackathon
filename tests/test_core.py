@@ -116,6 +116,25 @@ class StateMachineTests(unittest.TestCase):
         controller.set_mode(InteractionMode.EXPERT)
         self.assertEqual(controller.state.mode, InteractionMode.EXPERT)
 
+    def test_tempo_locks_after_twelfth_nod(self):
+        controller = EnsembleController(
+            nods_to_start=5,
+            nods_to_lock=12,
+            smoothing=0.0,
+        )
+        for index in range(12):
+            controller.record_nod(index * 0.5)
+        locked_bpm = controller.state.bpm
+        controller.record_nod(6.25)
+        controller.record_nod(7.25)
+        self.assertTrue(controller.tempo_locked)
+        self.assertEqual(controller.nod_count, 12)
+        self.assertAlmostEqual(controller.state.bpm, locked_bpm)
+
+    def test_tempo_lock_cannot_precede_start(self):
+        with self.assertRaises(ValueError):
+            EnsembleController(nods_to_start=5, nods_to_lock=4)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -16,6 +16,7 @@ import mediapipe as mp
 import rtmidi
 from pythonosc import dispatcher, osc_server, udp_client
 
+from .cameras import discover_cameras, open_camera, print_camera_list, resolve_camera
 from .core import (
     EnsembleController,
     InteractionMode,
@@ -171,7 +172,7 @@ class ControlEvent:
 
 
 class MidiOutputs:
-    """MIDI paths that stock Reaper and MRT2 Jam actually consume."""
+    """MIDI paths consumed by Reaper and the hosted MRT2 AU."""
 
     def __init__(self):
         self.reaper = rtmidi.MidiOut()
@@ -261,7 +262,7 @@ class SharedClock(threading.Thread):
 
 
 class PerformerMidiInput(threading.Thread):
-    SKIP_NAMES = ("GestureInstrument", "MusicianClock", "MRT2 - Jam")
+    SKIP_NAMES = ("GestureInstrument", "MusicianClock")
 
     def __init__(self, outputs: MidiOutputs, requested_port: str | None):
         super().__init__(daemon=True)
@@ -307,13 +308,13 @@ class PerformerMidiInput(threading.Thread):
         self.midiin.close_port()
 
 
-class Mrt2OscAdapter:
-    """Contract for the custom Jam fork; stock Jam does not implement it."""
+class Mrt2MockAdapter:
+    """Legacy OSC mock used to inspect conductor-to-MRT2 mappings."""
 
     def __init__(self, port: int):
         self.client = udp_client.SimpleUDPClient("127.0.0.1", port)
         self._last_parameters = None
-        print(f"[MRT2 ADAPTER] Custom Jam OSC expected at 127.0.0.1:{port}")
+        print(f"[MRT2 MOCK] OSC monitor expected at 127.0.0.1:{port}")
 
     def prepare(self) -> None:
         self.client.send_message("/mrt2/action/prepare", 1)
@@ -349,10 +350,78 @@ class Mrt2OscAdapter:
         self._last_parameters = parameters
 
 
+class Mrt2AuAdapter:
+    """Control an MRT2 AU instance hosted on a Reaper track."""
+
+    PARAMETER_INDEX = {
+        "temperature": 1,
+        "top_k": 2,
+        "cfg_musiccoca": 4,
+        "cfg_notes": 5,
+        "cfg_drums": 49,
+    }
+
+    def __init__(self, port: int, track: int, fx: int):
+        self.client = udp_client.SimpleUDPClient("127.0.0.1", port)
+        self.track = track
+        self.fx = fx
+        self._last_parameters = None
+        print(
+            f"[MRT2 AU] Reaper track {track}, FX {fx}, "
+            f"OSC 127.0.0.1:{port}"
+        )
+
+    @staticmethod
+    def _normalized(value: float, minimum: float, maximum: float) -> float:
+        return min(1.0, max(0.0, (value - minimum) / (maximum - minimum)))
+
+    def _parameter(self, index: int, value: float) -> None:
+        self.client.send_message(
+            f"/track/{self.track}/fx/{self.fx}/fxparam/{index}/value",
+            value,
+        )
+
+    def _bypass(self, enabled: bool) -> None:
+        self.client.send_message(
+            f"/track/{self.track}/fx/{self.fx}/bypass",
+            int(enabled),
+        )
+
+    def prepare(self) -> None:
+        self._bypass(False)
+
+    def start(self) -> None:
+        self._bypass(False)
+
+    def normal_stop(self, _bar_duration: float) -> None:
+        self._bypass(True)
+
+    def hold(self, _enabled: bool) -> None:
+        pass
+
+    def emergency_stop(self) -> None:
+        self._bypass(True)
+
+    def update(self, intent) -> None:
+        parameters = intent_to_mrt2(intent)
+        if parameters == self._last_parameters:
+            return
+        values = {
+            "temperature": self._normalized(parameters.temperature, 0.0, 3.0),
+            "top_k": self._normalized(parameters.top_k, 1.0, 1024.0),
+            "cfg_musiccoca": self._normalized(parameters.cfg_musiccoca, 0.0, 5.0),
+            "cfg_notes": self._normalized(parameters.cfg_notes, 0.0, 5.0),
+            "cfg_drums": self._normalized(parameters.cfg_drums, 0.0, 5.0),
+        }
+        for name, value in values.items():
+            self._parameter(self.PARAMETER_INDEX[name], value)
+        self._last_parameters = parameters
+
+
 class StructuralScheduler(threading.Thread):
     """Commit structural actions independently of camera frame rate."""
 
-    def __init__(self, adapter: Mrt2OscAdapter, events: queue.Queue[ControlEvent]):
+    def __init__(self, adapter, events: queue.Queue[ControlEvent]):
         super().__init__(daemon=True)
         self.adapter = adapter
         self.events = events
@@ -421,17 +490,31 @@ class StructuralScheduler(threading.Thread):
 
 
 class ReaperOsc:
+    GO_TO_PROJECT_START = 40042
+    TRANSPORT_PLAY = 1007
+    TRANSPORT_STOP = 1016
+
     def __init__(self, port: int):
         self.client = udp_client.SimpleUDPClient("127.0.0.1", port)
+
+    def action(self, command_id: int) -> None:
+        self.client.send_message(f"/action/{command_id}", 1.0)
 
     def tempo(self, bpm: float) -> None:
         self.client.send_message("/tempo/raw", bpm)
 
     def play(self) -> None:
-        self.client.send_message("/transport/play", 1.0)
+        self.action(self.TRANSPORT_PLAY)
 
     def stop(self) -> None:
-        self.client.send_message("/transport/stop", 1.0)
+        self.action(self.TRANSPORT_STOP)
+
+    def start_project(self, bpm: float) -> None:
+        """Start the prepared Reaper drum arrangement at the fifth nod."""
+        self.stop()
+        self.action(self.GO_TO_PROJECT_START)
+        self.tempo(bpm)
+        self.play()
 
 
 def start_control_server(events: queue.Queue[ControlEvent], port: int):
@@ -486,26 +569,50 @@ def create_face_landmarker():
 
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--camera", type=int, default=0)
+    parser.add_argument(
+        "--camera",
+        default="select",
+        help="camera index, or 'select' to choose from detected cameras",
+    )
+    parser.add_argument("--list-cameras", action="store_true")
     parser.add_argument("--control-port", type=int, default=9000)
     parser.add_argument("--feedback-port", type=int, default=9002)
+    parser.add_argument("--mrt2-backend", choices=("au", "mock"), default="au")
     parser.add_argument("--mrt2-port", type=int, default=9100)
+    parser.add_argument("--mrt2-track", type=int, default=2)
+    parser.add_argument("--mrt2-fx", type=int, default=1)
     parser.add_argument("--reaper-port", type=int, default=8000)
     parser.add_argument("--midi-port")
     parser.add_argument("--smoothing", type=float, default=0.65)
     parser.add_argument("--nods-to-start", type=int, default=5)
+    parser.add_argument("--nods-to-lock", type=int, default=12)
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    if args.list_cameras:
+        print_camera_list(discover_cameras())
+        return
+    camera_index = resolve_camera(args.camera, "performer")
     events: queue.Queue[ControlEvent] = queue.Queue()
-    controller = EnsembleController(args.nods_to_start, args.smoothing)
+    controller = EnsembleController(
+        nods_to_start=args.nods_to_start,
+        nods_to_lock=args.nods_to_lock,
+        smoothing=args.smoothing,
+    )
     outputs = MidiOutputs()
     clock = SharedClock(outputs)
     clock.start()
     performer = PerformerMidiInput(outputs, args.midi_port)
-    mrt2 = Mrt2OscAdapter(args.mrt2_port)
+    if args.mrt2_backend == "mock":
+        mrt2 = Mrt2MockAdapter(args.mrt2_port)
+    else:
+        mrt2 = Mrt2AuAdapter(
+            port=args.reaper_port,
+            track=args.mrt2_track,
+            fx=args.mrt2_fx,
+        )
     scheduler = StructuralScheduler(mrt2, events)
 
     def _note_on_callback(t: float) -> None:
@@ -543,9 +650,9 @@ def main() -> None:
     server = start_control_server(events, args.control_port)
     face = create_face_landmarker()
     nod_detector = NodDetector()
-    cap = cv2.VideoCapture(args.camera)
+    cap = open_camera(camera_index)
     if not cap.isOpened():
-        raise RuntimeError(f"cannot open laptop camera {args.camera}")
+        raise RuntimeError(f"cannot open performer camera {camera_index}")
 
     frame_timestamp_ms = 0
     nod_confidence = NodConfidence()
@@ -553,7 +660,10 @@ def main() -> None:
     _last_nod_time: float | None = None
     _conductor_energy: float = 0.5
     _conductor_style: int = 0
-    print(f"[READY] Performer nods {args.nods_to_start} times to establish tempo.")
+    print(
+        f"[READY] Performer nods {args.nods_to_start} times to start; "
+        f"tempo locks after nod {args.nods_to_lock}."
+    )
     try:
         while True:
             ok, frame = cap.read()
@@ -569,17 +679,30 @@ def main() -> None:
                 nose = result.face_landmarks[0][NOSE_TIP_IDX]
                 detected, _ = nod_detector.update(nose.y)
                 if detected:
+                    previous_nod_count = controller.nod_count
                     was_waiting = controller.state.transport == TransportState.WAITING
                     state = controller.record_nod(now)
-                    clock.set_bpm(state.bpm)
-                    reaper.tempo(state.bpm)
-                    if _last_nod_time is not None:
-                        nod_confidence.record_interval(now - _last_nod_time)
-                    _last_nod_time = now
-                    if was_waiting and state.transport == TransportState.READY:
+                    nod_was_accepted = controller.nod_count != previous_nod_count
+                    if nod_was_accepted:
+                        clock.set_bpm(state.bpm)
+                        reaper.tempo(state.bpm)
+                        if _last_nod_time is not None:
+                            nod_confidence.record_interval(now - _last_nod_time)
+                        _last_nod_time = now
+                    if nod_was_accepted and was_waiting and state.transport == TransportState.READY:
                         nod_confidence.mark_complete()
                         clock.start_at_bar_head()
-                        reaper.play()
+                        reaper.start_project(state.bpm)
+                        print(
+                            f"[REAPER] Start nod {args.nods_to_start}: "
+                            f"tempo {state.bpm:.1f} BPM, "
+                            "project returned to 1.1.00, playback started."
+                        )
+                    if controller.nod_count == args.nods_to_lock and previous_nod_count < args.nods_to_lock:
+                        print(
+                            f"[TEMPO] Locked at {state.bpm:.1f} BPM after "
+                            f"nod {args.nods_to_lock}; later nods are ignored."
+                        )
                 cv2.circle(
                     frame,
                     (int(nose.x * frame.shape[1]), int(nose.y * frame.shape[0])),
@@ -652,7 +775,11 @@ def main() -> None:
 
             cv2.rectangle(frame, (0, 0), (frame.shape[1], 78), (0, 0, 0), -1)
             line1 = f"{state.transport.value}  BPM {state.bpm:.1f}  BEAT {beat or '-'}"
-            line2 = f"MODE {state.mode.value.upper()}  NODS {controller.nod_count}/{args.nods_to_start}"
+            tempo_status = "TEMPO LOCKED" if controller.tempo_locked else "TEMPO LEARNING"
+            line2 = (
+                f"MODE {state.mode.value.upper()}  "
+                f"NODS {controller.nod_count}/{args.nods_to_lock}  {tempo_status}"
+            )
             cv2.putText(frame, line1, (14, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (90, 255, 120), 2)
             cv2.putText(frame, line2, (14, 62), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (220, 220, 220), 2)
 
