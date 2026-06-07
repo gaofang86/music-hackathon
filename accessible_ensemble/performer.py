@@ -15,6 +15,7 @@ import mediapipe as mp
 import rtmidi
 from pythonosc import dispatcher, osc_server, udp_client
 
+from .cameras import discover_cameras, open_camera, print_camera_list, resolve_camera
 from .core import (
     EnsembleController,
     InteractionMode,
@@ -371,7 +372,12 @@ def create_face_landmarker():
 
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--camera", type=int, default=0)
+    parser.add_argument(
+        "--camera",
+        default="select",
+        help="camera index, or 'select' to choose from detected cameras",
+    )
+    parser.add_argument("--list-cameras", action="store_true")
     parser.add_argument("--control-port", type=int, default=9000)
     parser.add_argument("--feedback-port", type=int, default=9002)
     parser.add_argument("--mrt2-port", type=int, default=9100)
@@ -385,6 +391,10 @@ def parse_args():
 
 def main() -> None:
     args = parse_args()
+    if args.list_cameras:
+        print_camera_list(discover_cameras())
+        return
+    camera_index = resolve_camera(args.camera, "performer")
     events: queue.Queue[ControlEvent] = queue.Queue()
     controller = EnsembleController(
         nods_to_start=args.nods_to_start,
@@ -402,9 +412,9 @@ def main() -> None:
     server = start_control_server(events, args.control_port)
     face = create_face_landmarker()
     nod_detector = NodDetector()
-    cap = cv2.VideoCapture(args.camera)
+    cap = open_camera(camera_index)
     if not cap.isOpened():
-        raise RuntimeError(f"cannot open laptop camera {args.camera}")
+        raise RuntimeError(f"cannot open performer camera {camera_index}")
 
     frame_timestamp_ms = 0
     print(

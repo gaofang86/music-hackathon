@@ -69,24 +69,22 @@ pip install -r requirements.txt
 
 Connect and unlock the iPhone by USB, select **Trust This Computer**, and keep Wi-Fi and Bluetooth enabled.
 
-Detect the camera numbers:
+On first use, allow the terminal application to access cameras under
+**System Settings > Privacy & Security > Camera**. Restart the terminal after
+changing this permission.
+
+Detect the camera options:
 
 ```bash
-python -c '
-import cv2
-for i in range(8):
-    cap = cv2.VideoCapture(i)
-    if cap.isOpened():
-        print("Available camera:", i)
-        cap.release()
-'
+python ensemble.py --list-cameras
 ```
 
-Typical assignments:
+Camera numbers are machine-specific. On one Mac, `camera 0` may be the iPhone;
+on another Mac, `camera 0` may be the laptop camera. Assign cameras by role:
 
 ```text
-camera 0 = Laptop = Performer
-camera 1 = iPhone = Conductor
+Laptop / built-in / external webcam -> Performer
+iPhone Continuity Camera            -> Conductor
 ```
 
 ## Test Run
@@ -110,13 +108,19 @@ Terminal 2:
 ```bash
 cd ~/Desktop/music-hackathon
 source .venv/bin/activate
-python ensemble.py --camera 0
+python ensemble.py
 ```
+
+The app lists available cameras and asks which one should be used for the
+performer. When multiple cameras are available, it also displays numbered
+camera previews so the correct role can be identified visually. For a fixed
+show setup, pass the known index explicitly, for example
+`python ensemble.py --camera 0`.
 
 With a MIDI keyboard:
 
 ```bash
-python ensemble.py --camera 0 --midi-port "Keyboard Name"
+python ensemble.py --midi-port "Keyboard Name"
 ```
 
 By default, the performer nods five times to establish the tempo. The final nod is beat 1 of the first bar. Tempo refinement continues through the twelfth valid nod. The twelfth nod sets the final smoothed BPM; all later nods are ignored so ordinary head movement cannot keep changing Reaper's tempo. Press `R` in the performer window to reset the session and learn a new tempo.
@@ -134,15 +138,19 @@ Terminal 3:
 ```bash
 cd ~/Desktop/music-hackathon
 source .venv/bin/activate
-python gesture_midi.py --camera 1 --mode beginner --input auto
+python gesture_midi.py --mode beginner --input auto
 ```
+
+Choose the conductor's iPhone camera from the startup menu. For a fixed show
+setup, pass the known index explicitly, for example
+`python gesture_midi.py --camera 1 --mode beginner --input auto`.
 
 You can explicitly select the body input:
 
 ```bash
-python gesture_midi.py --camera 1 --input hands
-python gesture_midi.py --camera 1 --input face
-python gesture_midi.py --camera 1 --input body
+python gesture_midi.py --input hands
+python gesture_midi.py --input face
+python gesture_midi.py --input body
 ```
 
 The system does not infer a participant's abilities from a failed hand detection. For formal use, explicitly select the participant's preferred input method.

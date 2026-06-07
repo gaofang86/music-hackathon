@@ -17,6 +17,7 @@ import mediapipe as mp
 import numpy as np
 from pythonosc import dispatcher, osc_server, udp_client
 
+from .cameras import discover_cameras, open_camera, print_camera_list, resolve_camera
 from .core import InteractionMode, clamp
 
 
@@ -508,7 +509,12 @@ def render_ui(
 
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--camera", type=int, default=1)
+    parser.add_argument(
+        "--camera",
+        default="select",
+        help="camera index, or 'select' to choose from detected cameras",
+    )
+    parser.add_argument("--list-cameras", action="store_true")
     parser.add_argument("--mode", choices=[mode.value for mode in InteractionMode], default="beginner")
     parser.add_argument("--input", choices=("auto", "hands", "face", "body"), default="auto")
     parser.add_argument("--profile", default="default")
@@ -519,6 +525,10 @@ def parse_args():
 
 def main():
     args = parse_args()
+    if args.list_cameras:
+        print_camera_list(discover_cameras())
+        return
+    camera_index = resolve_camera(args.camera, "conductor")
     control = udp_client.SimpleUDPClient("127.0.0.1", args.control_port)
     feedback_state = FeedbackState()
     feedback_server = start_feedback_server(feedback_state, args.feedback_port)
@@ -538,9 +548,9 @@ def main():
     face = mp_vision.FaceLandmarker.create_from_options(mp_vision.FaceLandmarkerOptions(base_options=mp_python.BaseOptions(model_asset_path=face_model), running_mode=running, num_faces=1))
     pose = mp_vision.PoseLandmarker.create_from_options(mp_vision.PoseLandmarkerOptions(base_options=mp_python.BaseOptions(model_asset_path=pose_model), running_mode=running))
 
-    cap = cv2.VideoCapture(args.camera)
+    cap = open_camera(camera_index)
     if not cap.isOpened():
-        raise RuntimeError(f"cannot open iPhone camera {args.camera}")
+        raise RuntimeError(f"cannot open conductor camera {camera_index}")
 
     previous = {}
     stop_gate = HoldGate(0.8)

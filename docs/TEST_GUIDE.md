@@ -81,17 +81,13 @@ python -c "import cv2, mediapipe, rtmidi, pythonosc; print('Dependencies OK')"
 
 ## 7. Camera Detection
 
+Confirm the terminal application is enabled under
+**System Settings > Privacy & Security > Camera**.
+
 Run:
 
 ```bash
-python -c '
-import cv2
-for i in range(8):
-    cap = cv2.VideoCapture(i)
-    if cap.isOpened():
-        print("Available camera:", i)
-        cap.release()
-'
+python ensemble.py --list-cameras
 ```
 
 Record the camera numbers:
@@ -101,7 +97,9 @@ Performer camera: ______
 Conductor iPhone camera: ______
 ```
 
-Typical values are `0` for the laptop camera and `1` for the iPhone.
+Camera numbers are not stable across machines. On one machine `0` may be the
+iPhone; on another machine `0` may be the laptop camera. Use the startup menu
+or `--list-cameras` on each computer before assigning roles.
 
 ## 8. MIDI Device Check
 
@@ -196,15 +194,17 @@ python mrt2_mock.py
 cd ~/Desktop/music-hackathon
 source .venv/bin/activate
 python ensemble.py \
-  --camera PERFORMER_CAMERA \
   --midi-port "MIDI KEYBOARD NAME"
 ```
 
 Example:
 
 ```bash
-python ensemble.py --camera 0 --midi-port "KeyLab"
+python ensemble.py --midi-port "KeyLab"
 ```
+
+Choose the performer camera from the startup menu. For a fixed show setup, add
+`--camera PERFORMER_CAMERA`.
 
 ### Terminal 3: Conductor UI
 
@@ -212,7 +212,6 @@ python ensemble.py --camera 0 --midi-port "KeyLab"
 cd ~/Desktop/music-hackathon
 source .venv/bin/activate
 python gesture_midi.py \
-  --camera IPHONE_CAMERA \
   --mode beginner \
   --input auto \
   --profile test-user
@@ -221,8 +220,11 @@ python gesture_midi.py \
 Example:
 
 ```bash
-python gesture_midi.py --camera 1 --mode beginner --profile test-user
+python gesture_midi.py --mode beginner --profile test-user
 ```
+
+Choose the conductor iPhone camera from the startup menu. For a fixed show
+setup, add `--camera IPHONE_CAMERA`.
 
 ## 12. Calibration Test
 
