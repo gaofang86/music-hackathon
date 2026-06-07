@@ -1,9 +1,8 @@
 #!/bin/bash
-# Creates a virtual MIDI bus so MRT2 Jam can receive from GestureInstrument.
+# Opens Audio MIDI Setup for the MRT2 Jam fallback configuration.
 #
-# Option A (automatic): gesture_midi.py already creates a virtual port via
-#   rtmidi.MidiOut().open_virtual_port("GestureInstrument")
-#   Just run the Python script — no extra setup needed.
+# Option A (automatic): ensemble.py creates the GestureInstrument and
+# MusicianClock virtual ports. No manual setup is normally needed.
 #
 # Option B (manual IAC bus): if you want a persistent IAC bus that survives
 #   across app restarts, enable the IAC Driver in Audio MIDI Setup.
@@ -25,5 +24,5 @@ echo ""
 echo "Then in MRT2 Jam:"
 echo "  Settings > MIDI Input > select 'GestureInstrument' or 'IAC Driver Bus 1'"
 echo ""
-echo "Or just run:  python gesture_midi.py"
-echo "(The script opens its own virtual port automatically.)"
+echo "Or just run:  python ensemble.py"
+echo "(The ensemble opens GestureInstrument and MusicianClock automatically.)"
