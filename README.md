@@ -1,62 +1,80 @@
 # Accessible MRT2 Ensemble
 
-The performer establishes the BPM through head nods captured by the laptop camera and provides musical content through a MIDI keyboard. The conductor uses the iPhone Continuity Camera to control musical structure and direction.
+A two-track live performance system. The musician establishes tempo through head nods and provides musical content via MIDI keyboard. The conductor shapes the AI-generated background using body movement and facial expressions — no music knowledge required.
 
-The iPhone only supplies video. No OSC app is required on the phone. All recognition and OSC communication run locally on the Mac.
+See [CONDUCTOR_DESIGN.md](docs/CONDUCTOR_DESIGN.md) for the full design specification.
+See [TEST_GUIDE.md](docs/TEST_GUIDE.md) for hardware and software testing procedures.
 
-See [CONDUCTOR_DESIGN.md](docs/CONDUCTOR_DESIGN.md) for the complete design specification.
-See [TEST_GUIDE.md](docs/TEST_GUIDE.md) for the full hardware and software testing procedure.
+---
+
+## Architecture
+
+```
+MUSICIAN                              CONDUCTOR
+laptop cam (index 0)                  iPhone cam (index 1)
+    │                                     │
+ Head nods ×5 → BPM established      Hands / face / body
+    │                                     │
+    ├── MIDI Clock → Reaper           MusicalIntent
+    │   (beat sync + kick/snare/hat)  energy / style / pulse
+    │                                     │
+    ├── MIDI notes → MRT2             OSC → 127.0.0.1:9000
+    │   (melodic conditioning)             │
+    │                                      ▼
+    │                              EnsembleController
+    │                              WAITING→READY→ARMED→ACTIVE
+    │                                      │
+    │                              Mrt2OscAdapter → 127.0.0.1:9100
+    │                              temperature / cfg_notes / cfg_drums
+    │                                      │
+    └──────── bidirectional nudge ─────────┘
+         Musician velocity → energy floor → conductor nudge
+         Conductor style   → performer HUD background tint
+
+              ↓                    ↓
+         Reaper audio         MRT2 audio
+         (musician's          (AI-generated
+          real sound)          accompaniment)
+              └────────────────────┘
+                    speakers
+```
+
+### OSC ports
+
+| Port | Direction | Content |
+|------|-----------|---------|
+| 9000 | conductor → performer | musical intentions + actions |
+| 9002 | performer → conductor | feedback (BPM, beat, state) |
+| 9003 | conductor → performer | style + energy for HUD tint |
+| 9004 | performer → conductor | energy floor (soft nudge) |
+| 9100 | performer → MRT2 bridge | generation parameters |
+
+> **Note:** MRT2 Jam's stock MIDI input only handles Note On/Off. The 9100 bridge is currently mocked by `mrt2_mock.py`. Conductor parameters have no effect on real MRT2 until the OSC bridge is implemented.
+
+---
 
 ## Project Structure
 
-```text
+```
 music-hackathon/
-├── accessible_ensemble/     # Application implementation
-│   ├── core.py              # Tempo, musical intentions, and state machine
-│   ├── performer.py         # Performer camera, MIDI, Reaper, and orchestration
-│   ├── conductor.py         # Calibration and three-mode conductor UI
-│   └── mrt2_mock.py         # Visual mock of the custom MRT2 OSC bridge
-├── docs/                    # Design and hardware/software test guides
-├── models/                  # MediaPipe model assets
-├── scripts/                 # Optional setup utilities
-├── tests/                   # Automated tests
-├── ensemble.py              # Performer compatibility entry point
-├── gesture_midi.py          # Conductor compatibility entry point
-├── mrt2_mock.py             # Mock-backend compatibility entry point
-├── musician.py              # Legacy performer alias
+├── accessible_ensemble/
+│   ├── core.py          # tempo, musical intent, state machine
+│   ├── performer.py     # musician camera, MIDI, Reaper, ensemble orchestration
+│   ├── conductor.py     # conductor camera, three interaction modes, calibration
+│   └── mrt2_mock.py     # visual mock of the MRT2 OSC bridge
+├── docs/
+│   ├── CONDUCTOR_DESIGN.md
+│   └── TEST_GUIDE.md
+├── models/              # MediaPipe model assets (auto-downloaded)
+├── ensemble.py          # entry point → accessible_ensemble.performer
+├── gesture_midi.py      # entry point → accessible_ensemble.conductor
+├── mrt2_mock.py         # entry point → accessible_ensemble.mrt2_mock
 └── requirements.txt
 ```
 
-The root entry points keep the existing commands stable. New implementation
-code should be added under `accessible_ensemble/`.
+---
 
-## Current Architecture
-
-```text
-Laptop Camera -> ensemble.py
-  -> Performer head-controlled BPM
-  -> Reaper / MusicianClock
-
-MIDI Keyboard -> ensemble.py
-  -> GestureInstrument Note On/Off
-  -> MRT2 Jam note conditioning
-
-iPhone Camera -> gesture_midi.py
-  -> Personal calibration
-  -> Beginner / Assisted / Expert musical intentions
-  -> 127.0.0.1:9000
-  -> ensemble.py state machine
-  -> 127.0.0.1:9100
-  -> Custom MRT2 Jam OSC Bridge
-```
-
-The stock MRT2 Jam MIDI input only handles Note On and Note Off. It does not process the previously used CC20-25 controls, MIDI Clock, or Start/Stop messages. Therefore:
-
-- Performer notes can still enter stock Jam through `GestureInstrument`.
-- Conductor parameters require the custom Jam OSC Bridge.
-- Until that bridge is implemented, use `mrt2_mock.py` to test the complete interaction.
-
-## Installation
+## Setup
 
 ```bash
 cd ~/Desktop/music-hackathon
@@ -65,246 +83,136 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-## Cameras
+### Cameras
 
-Connect and unlock the iPhone by USB, select **Trust This Computer**, and keep Wi-Fi and Bluetooth enabled.
-
-Detect the camera numbers:
+Connect iPhone via USB, select **Trust This Computer**, keep Wi-Fi and Bluetooth on.
 
 ```bash
 python -c '
 import cv2
-for i in range(8):
+for i in range(4):
     cap = cv2.VideoCapture(i)
     if cap.isOpened():
-        print("Available camera:", i)
+        print("Camera available:", i)
         cap.release()
 '
 ```
 
-Typical assignments:
+Typical: `0` = laptop, `1` = iPhone.
 
-```text
-camera 0 = Laptop = Performer
-camera 1 = iPhone = Conductor
-```
+---
 
-## Test Run
+## Running
 
-### 1. Start the MRT2 Mock Backend
+Open three terminals:
 
-Terminal 1:
-
+**Terminal 1 — MRT2 mock (start first)**
 ```bash
-cd ~/Desktop/music-hackathon
 source .venv/bin/activate
 python mrt2_mock.py
 ```
 
-It displays `temperature`, `top_k`, the three CFG values, style, and structural actions.
-
-### 2. Start the Performer Controller
-
-Terminal 2:
-
+**Terminal 2 — Musician**
 ```bash
-cd ~/Desktop/music-hackathon
 source .venv/bin/activate
 python ensemble.py --camera 0
-```
-
-With a MIDI keyboard:
-
-```bash
+# with MIDI keyboard:
 python ensemble.py --camera 0 --midi-port "Keyboard Name"
 ```
 
-By default, the performer nods five times to establish the tempo. The final nod is beat 1 of the first bar.
+Nod 5 times at your desired tempo. The 5th nod starts the clock and Reaper.
 
-### 3. Start the Conductor Interface
-
-Terminal 3:
-
+**Terminal 3 — Conductor**
 ```bash
-cd ~/Desktop/music-hackathon
 source .venv/bin/activate
-python gesture_midi.py --camera 1 --mode beginner --input auto
+python gesture_midi.py --camera 1 --mode beginner
 ```
 
-You can explicitly select the body input:
+Then in **MRT2 Jam → MIDI INPUT → GestureInstrument**.
 
-```bash
-python gesture_midi.py --camera 1 --input hands
-python gesture_midi.py --camera 1 --input face
-python gesture_midi.py --camera 1 --input body
+---
+
+## Musician Track
+
+### Tempo
+- Nod 5 times → BPM established → MIDI clock starts → Reaper syncs
+- Confidence bar appears after 5th nod, fades after 3 seconds
+- `r` to reset, `q` to quit
+
+### MIDI keyboard
+- Notes forwarded directly to MRT2 as melodic conditioning
+- Playing velocity tracked → soft energy floor sent to conductor
+
+### Performer HUD
+- Top bar: transport state, BPM, beat number, nod count
+- Bottom strip: background tint reflects conductor's current style
+  - Warm Acoustic → orange, Dark Cinematic → deep blue, Bright Electronic → cyan
+
+### Reaper sync
+- `MusicianClock` port carries MIDI Clock + kick/snare/hihat
+- OSC `/tempo/raw` keeps Reaper's grid aligned
+- Set Reaper time signature to 4/4, slave transport to `MusicianClock`
+
+---
+
+## Conductor Track
+
+### Three modes
+
+| Mode | Available controls |
+|------|--------------------|
+| Beginner | Start / Stop / Calm / Medium / Intense |
+| Assisted | + Follow Performer + Rhythmic Pulse |
+| Expert | + Adventure + Style Commitment + Style Preset + Section |
+
+Switch with keys `1` / `2` / `3`.
+
+### Bidirectional nudge
+- Musician plays hard (high velocity) → energy floor rises → conductor feels resistance below ~0.4
+- Conductor sets style → performer HUD tint changes → musician sees it in peripheral vision
+
+### State machine
 ```
-
-The system does not infer a participant's abilities from a failed hand detection. For formal use, explicitly select the participant's preferred input method.
-
-## Three Conductor Modes
-
-### Beginner
-
-Displays and controls only:
-
-- Start on the next bar
-- Calm / Medium / Intense energy levels
-- End on the next bar
-- HOLD and emergency stop
-
-```bash
-python gesture_midi.py --mode beginner
+WAITING → READY → ARMED → ACTIVE
+                         → HOLD → ACTIVE
+                         → STOP_QUEUED → READY
+ANY → EMERGENCY_STOP
 ```
+Start and stop always take effect on the next bar boundary.
 
-### Assisted
-
-Adds two continuous musical dimensions:
-
-- `Follow Performer`: closely follow the performer or move more freely
-- `Rhythmic Pulse`: more melodic or more rhythmic
-
-```bash
-python gesture_midi.py --mode assisted
-```
-
-### Expert
-
-Also adds:
-
-- Adventure
-- Style Commitment
-- Style Preset
-- Section
-
-```bash
-python gesture_midi.py --mode expert
-```
-
-Press `1`, `2`, or `3` during operation to switch modes.
-
-## Conductor UI
-
-The interface always displays:
-
-- `WAITING / READY / ARMED / ACTIVE / HOLD / STOP QUEUED`
-- Current beat in 4/4
-- Start or stop countdown
-- BPM
-- Tracking status
-- Current mode and input source
-- Current musical intentions
-
-Keyboard fallback controls:
+### Keyboard controls
 
 | Key | Action |
-|---|---|
+|-----|--------|
 | `1/2/3` | Beginner / Assisted / Expert |
-| `C` | Start personal calibration |
-| `S` | Start on the next bar |
-| `X` | End normally on the next bar |
-| `Space` | HOLD / Resume |
-| `E` | Immediate emergency stop |
-| `[` / `]` | Expert style preset |
-| `N` | Expert next section |
+| `C` | Personal calibration |
+| `S` | Start on next bar |
+| `X` | End on next bar |
+| `Space` | Hold / Resume |
+| `E` | Emergency stop |
+| `[` / `]` | Style preset (Expert) |
+| `N` | Next section (Expert) |
 | `Q` | Quit |
 
-## Personal Calibration
+---
 
-Press `C`:
+## Musical Intent → MRT2 Parameters
 
-1. Remain naturally still for three seconds to record noise and the neutral position.
-2. Move through a comfortable range for five seconds.
-3. The result is saved to `profiles/<profile>.json`.
+| Intent | MRT2 parameter | Range |
+|--------|---------------|-------|
+| Energy | temperature + top_k | 0.8–1.55 / 24–140 |
+| Follow Performer | cfg_notes | 0.8–4.2 |
+| Rhythmic Pulse | cfg_drums | 1.0–4.5 |
+| Style Commitment | cfg_musiccoca | 0.8–4.0 |
 
-Specify a profile:
+---
 
-```bash
-python gesture_midi.py --profile alice --input body
-```
+## Troubleshooting
 
-The calibrated relative movement range is mapped to `0..1`, instead of relying on universal screen-distance thresholds.
-
-## State Machine
-
-```text
-WAITING -> READY -> ARMED -> ACTIVE
-                           -> HOLD -> ACTIVE
-                           -> STOP_QUEUED -> READY
-ANY -> EMERGENCY_STOP
-```
-
-- A normal start takes effect on the next bar.
-- A normal ending begins a one-bar fade on the next bar.
-- HOLD freezes musical intentions and allows the conductor to rest.
-- Tracking loss automatically enters HOLD without moving parameters toward zero.
-- Emergency Stop immediately mutes and bypasses MRT2.
-
-## Musical Intention Mapping
-
-Performance-safe ranges:
-
-| Musical Intention | MRT2 |
-|---|---|
-| Energy | `temperature 0.8-1.55`, `top_k 24-140` |
-| Follow Performer | `cfg_notes 0.8-4.2` |
-| Rhythmic Pulse | `cfg_drums 1.0-4.5` |
-| Style Commitment | `cfg_musiccoca 0.8-4.0` |
-| Style | Precomputed style preset |
-
-`cfg_drums` is fully meaningful only when the custom backend supplies real drum conditioning.
-
-## Local OSC
-
-Conductor intentions:
-
-```text
-127.0.0.1:9000
-
-/conductor/action/start
-/conductor/action/hold
-/conductor/action/resume
-/conductor/action/stop
-/conductor/action/emergency_stop
-/conductor/energy
-/conductor/follow
-/conductor/pulse
-/conductor/adventure
-/conductor/style_commitment
-/conductor/style
-/conductor/section
-/conductor/mode
-/conductor/tracking
-```
-
-Custom Jam Bridge:
-
-```text
-127.0.0.1:9100
-
-/mrt2/temperature
-/mrt2/top_k
-/mrt2/cfg_musiccoca
-/mrt2/cfg_notes
-/mrt2/cfg_drums
-/mrt2/style
-/mrt2/section
-/mrt2/volume
-/mrt2/volume_ramp
-/mrt2/bypass
-/mrt2/action/prepare
-/mrt2/action/start
-/mrt2/action/hold
-/mrt2/action/stop_queued
-```
-
-## Automated Tests
-
-```bash
-python -m unittest discover -v -s tests
-python -m py_compile \
-  ensemble.py \
-  gesture_midi.py \
-  mrt2_mock.py \
-  musician.py \
-  accessible_ensemble/*.py
-```
+| Issue | Fix |
+|-------|-----|
+| Camera won't open | System Settings → Privacy → Camera → allow Terminal, restart Terminal |
+| MRT2 can't see GestureInstrument | Start `gesture_midi.py` first, then open MRT2 |
+| Reaper can't see MusicianClock | Start `ensemble.py` first, then open Reaper |
+| mock shows stale OSC timestamp | Check ensemble.py is running and past WAITING state |
+| Nods not detected | Improve lighting, face camera squarely, nod more deliberately |

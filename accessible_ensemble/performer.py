@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import collections
 import os
 import queue
 import threading
@@ -27,6 +28,129 @@ from .core import (
 NOSE_TIP_IDX = 1
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MODEL_DIR = os.path.join(PROJECT_ROOT, "models")
+
+# ---------------------------------------------------------------------------
+# Stability helpers
+# ---------------------------------------------------------------------------
+
+class NodConfidence:
+    """Confidence of BPM estimate from nod intervals (0–1). Fades after nods complete."""
+
+    def __init__(self):
+        self._intervals: list[float] = []
+        self._completed_at: float | None = None
+        self._fade_duration = 3.0
+
+    def record_interval(self, interval: float) -> None:
+        self._intervals.append(interval)
+
+    def mark_complete(self) -> None:
+        self._completed_at = time.monotonic()
+
+    def confidence(self) -> float:
+        if len(self._intervals) < 2:
+            return 0.0
+        mean = sum(self._intervals) / len(self._intervals)
+        variance = sum((x - mean) ** 2 for x in self._intervals) / len(self._intervals)
+        cv = (variance ** 0.5) / mean if mean > 0 else 1.0
+        return max(0.0, min(1.0, 1.0 - cv * 5))
+
+    def visible(self) -> bool:
+        """Show during nod phase and for fade_duration seconds after completion."""
+        if self._completed_at is None:
+            return True
+        return (time.monotonic() - self._completed_at) < self._fade_duration
+
+
+class PerformerIntensity:
+    """Track musician's playing intensity from recent note velocities."""
+
+    def __init__(self, window: int = 8):
+        self._velocities: collections.deque[float] = collections.deque(maxlen=window)
+
+    def record_note(self, velocity: int) -> None:
+        self._velocities.append(float(velocity))
+
+    def intensity(self) -> float:
+        """0–1, based on mean velocity of recent notes."""
+        if not self._velocities:
+            return 0.0
+        return min(1.0, sum(self._velocities) / len(self._velocities) / 127.0)
+
+    def energy_floor(self) -> float:
+        """Soft minimum energy the conductor should feel resistance below."""
+        i = self.intensity()
+        if i > 0.7:
+            return 0.4   # playing hard → background can't go too quiet
+        if i > 0.4:
+            return 0.2
+        return 0.0       # playing softly → conductor has full range
+
+
+# Style → background tint colour for performer HUD (BGR)
+STYLE_TINTS = {
+    0: (30, 100, 180),   # Warm Acoustic → warm orange
+    1: (60, 60, 60),     # Minimal Pulse → neutral grey
+    2: (180, 200, 40),   # Bright Electronic → cyan
+    3: (120, 40, 20),    # Dark Cinematic → deep blue
+    4: (40, 80, 180),    # Percussive Experimental → purple
+}
+
+
+def draw_nod_hud(
+    frame: "np.ndarray",
+    nod_confidence: "NodConfidence",
+    nods_done: int,
+    nods_needed: int,
+    style_index: int,
+    conductor_energy: float,
+    energy_floor: float,
+) -> None:
+    h, w = frame.shape[:2]
+
+    # --- Background tint from conductor style (subtle, bottom strip) ---
+    tint = STYLE_TINTS.get(style_index, (40, 40, 40))
+    overlay = frame.copy()
+    cv2.rectangle(overlay, (0, h - 36), (w, h), tint, -1)
+    cv2.addWeighted(overlay, 0.25, frame, 0.75, 0, frame)
+
+    # --- Nod progress / confidence (disappears after fade) ---
+    if nod_confidence.visible():
+        panel_y = h - 36
+        confidence = nod_confidence.confidence()
+        bar_w = 200
+        bx = 14
+
+        if nods_done < nods_needed:
+            # Dots showing nod progress
+            for i in range(nods_needed):
+                cx = bx + i * 22
+                cy = panel_y + 18
+                color = (0, 220, 80) if i < nods_done else (60, 60, 60)
+                cv2.circle(frame, (cx, cy), 7, color, -1)
+            cv2.putText(frame, f"NOD {nods_done}/{nods_needed}",
+                        (bx + nods_needed * 22 + 10, panel_y + 22),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 255), 1)
+        else:
+            # Confidence bar, fades out
+            elapsed = time.monotonic() - nod_confidence._completed_at
+            alpha = max(0.0, 1.0 - elapsed / nod_confidence._fade_duration)
+            bar_color_base = (0, 220, 80) if confidence > 0.75 else (0, 180, 255) if confidence > 0.4 else (0, 100, 220)
+            bar_color = tuple(int(c * alpha) for c in bar_color_base)
+            text_color = tuple(int(c * alpha) for c in (200, 200, 200))
+            cv2.rectangle(frame, (bx, panel_y + 8), (bx + bar_w, panel_y + 22), (40, 40, 40), -1)
+            fill = int(confidence * bar_w)
+            if fill > 0:
+                cv2.rectangle(frame, (bx, panel_y + 8), (bx + fill, panel_y + 22), bar_color, -1)
+            cv2.putText(frame, f"BPM confidence  {int(confidence * 100)}%",
+                        (bx + bar_w + 10, panel_y + 22),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.42, text_color, 1)
+
+    # --- Conductor energy floor hint (right side, only when active) ---
+    if energy_floor > 0.0 and conductor_energy < energy_floor + 0.05:
+        hint = "↑ playing hard"
+        cv2.putText(frame, hint, (w - 160, h - 12),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 180, 255), 1)
 DRUM_CHANNEL = 9
 KICK, SNARE, HI_HAT = 36, 38, 42
 MIDI_CLOCKS_PER_BEAT = 24
@@ -170,6 +294,11 @@ class PerformerMidiInput(threading.Thread):
             status = message[0] & 0xF0 if message else 0
             if status in (0x80, 0x90):
                 self.outputs.forward_note(message)
+                if status == 0x90 and len(message) > 2 and message[2] > 0:
+                    self._on_note_on(time.monotonic())
+
+    def _on_note_on(self, t: float) -> None:
+        pass  # patched from main() after construction
 
     def close(self) -> None:
         self.active = False
@@ -378,6 +507,37 @@ def main() -> None:
     performer = PerformerMidiInput(outputs, args.midi_port)
     mrt2 = Mrt2OscAdapter(args.mrt2_port)
     scheduler = StructuralScheduler(mrt2, events)
+
+    def _note_on_callback(t: float) -> None:
+        pass  # velocity patched separately
+
+    performer._on_note_on = _note_on_callback
+
+    # Also intercept velocity for intensity tracking
+    _orig_forward = outputs.forward_note
+
+    def _forward_with_intensity(message: list[int]) -> None:
+        _orig_forward(message)
+        if (message[0] & 0xF0) == 0x90 and len(message) > 2 and message[2] > 0:
+            performer_intensity.record_note(message[2])
+
+    outputs.forward_note = _forward_with_intensity
+
+    # Listen to conductor energy/style from feedback port so performer HUD can show tint
+    _conductor_osc = dispatcher.Dispatcher()
+
+    def _set_conductor_energy(_addr, value):
+        nonlocal _conductor_energy
+        _conductor_energy = float(value)
+
+    def _set_conductor_style(_addr, value):
+        nonlocal _conductor_style
+        _conductor_style = int(value)
+
+    _conductor_osc.map("/conductor/energy", _set_conductor_energy)
+    _conductor_osc.map("/conductor/style", _set_conductor_style)
+    _conductor_listen = osc_server.ThreadingOSCUDPServer(("127.0.0.1", 9003), _conductor_osc)
+    threading.Thread(target=_conductor_listen.serve_forever, daemon=True).start()
     reaper = ReaperOsc(args.reaper_port)
     feedback = udp_client.SimpleUDPClient("127.0.0.1", args.feedback_port)
     server = start_control_server(events, args.control_port)
@@ -388,6 +548,11 @@ def main() -> None:
         raise RuntimeError(f"cannot open laptop camera {args.camera}")
 
     frame_timestamp_ms = 0
+    nod_confidence = NodConfidence()
+    performer_intensity = PerformerIntensity()
+    _last_nod_time: float | None = None
+    _conductor_energy: float = 0.5
+    _conductor_style: int = 0
     print(f"[READY] Performer nods {args.nods_to_start} times to establish tempo.")
     try:
         while True:
@@ -408,7 +573,11 @@ def main() -> None:
                     state = controller.record_nod(now)
                     clock.set_bpm(state.bpm)
                     reaper.tempo(state.bpm)
+                    if _last_nod_time is not None:
+                        nod_confidence.record_interval(now - _last_nod_time)
+                    _last_nod_time = now
                     if was_waiting and state.transport == TransportState.READY:
+                        nod_confidence.mark_complete()
                         clock.start_at_bar_head()
                         reaper.play()
                 cv2.circle(
@@ -486,6 +655,18 @@ def main() -> None:
             line2 = f"MODE {state.mode.value.upper()}  NODS {controller.nod_count}/{args.nods_to_start}"
             cv2.putText(frame, line1, (14, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (90, 255, 120), 2)
             cv2.putText(frame, line2, (14, 62), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (220, 220, 220), 2)
+
+            energy_floor = performer_intensity.energy_floor()
+            feedback.send_message("/performer/energy_floor", energy_floor)
+            draw_nod_hud(
+                frame,
+                nod_confidence=nod_confidence,
+                nods_done=controller.nod_count,
+                nods_needed=args.nods_to_start,
+                style_index=_conductor_style,
+                conductor_energy=_conductor_energy,
+                energy_floor=energy_floor,
+            )
             cv2.imshow("Performer Tempo and Ensemble State", frame)
             key = cv2.waitKey(1) & 0xFF
             if key == ord("q"):

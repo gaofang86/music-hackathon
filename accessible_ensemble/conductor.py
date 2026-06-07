@@ -411,6 +411,7 @@ def main():
     held = False
     style_index = 0
     section_index = 0
+    energy_floor = 0.0  # soft minimum from performer intensity
     values = {
         "energy": 0.5,
         "follow": 0.5,
@@ -419,6 +420,16 @@ def main():
         "style_commitment": 0.4,
         "tracking": False,
     }
+
+    # Listen for performer energy floor on port 9004
+    _perf_disp = dispatcher.Dispatcher()
+    def _recv_floor(_addr, value):
+        nonlocal energy_floor
+        energy_floor = float(value)
+    _perf_disp.map("/performer/energy_floor", _recv_floor)
+    _perf_server = osc_server.ThreadingOSCUDPServer(("127.0.0.1", 9004), _perf_disp)
+    threading.Thread(target=_perf_server.serve_forever, daemon=True).start()
+
     control.send_message("/conductor/mode", mode.value)
 
     try:
@@ -466,7 +477,9 @@ def main():
                 control.send_message("/conductor/tracking", int(raw.tracking))
                 last_tracking_send = raw.tracking
             if not held and now - last_send >= 0.08:
-                control.send_message("/conductor/energy", values["energy"])
+                # Apply soft floor from performer intensity — nudge, not lock
+                effective_energy = max(values["energy"], energy_floor * 0.85)
+                control.send_message("/conductor/energy", effective_energy)
                 if mode in (InteractionMode.ASSISTED, InteractionMode.EXPERT):
                     control.send_message("/conductor/follow", values["follow"])
                     control.send_message("/conductor/pulse", values["pulse"])
@@ -475,6 +488,13 @@ def main():
                     control.send_message("/conductor/style_commitment", values["style_commitment"])
                     control.send_message("/conductor/style", style_index)
                     control.send_message("/conductor/section", section_index)
+                # Always broadcast style to performer HUD (port 9003)
+                udp_client.SimpleUDPClient("127.0.0.1", 9003).send_message(
+                    "/conductor/style", style_index
+                )
+                udp_client.SimpleUDPClient("127.0.0.1", 9003).send_message(
+                    "/conductor/energy", effective_energy
+                )
                 last_send = now
 
             display = render_ui(
