@@ -39,6 +39,15 @@ MIDI_CLOCKS_PER_BEAT = 24    # standard MIDI spec
 
 NOD_FLASH_MS       = 200     # how long green nod indicator stays lit (ms)
 
+# Autocorrelation BPM refinement constants
+REFINER_MIN_NOTES  = 8       # minimum note timestamps needed
+REFINER_COOLDOWN_S = 3.0     # minimum seconds between autocorr analyses
+REFINER_SIGMA_MS   = 20.0    # gaussian sigma for IOI matching
+REFINER_BIN_MS     = 5.0     # lag bin size in ms
+REFINER_CONF_RATIO = 2.0     # best_score must be this times second_best_score
+REFINER_BLEND_CURR = 0.3     # weight of current BPM in blend
+REFINER_BLEND_AUTO = 0.7     # weight of autocorr result in blend
+
 
 # ---------------------------------------------------------------------------
 # NodDetector
@@ -227,6 +236,167 @@ class MidiClock:
 
 
 # ---------------------------------------------------------------------------
+# MidiInputListener
+# ---------------------------------------------------------------------------
+class MidiInputListener:
+    """
+    Opens the first available hardware MIDI input port (skipping our own
+    virtual ports) and collects note-on timestamps in a deque.
+
+    Public attributes:
+        available (bool)          – False if no suitable port was found
+        port_name (str)           – name of the opened port, or "" if none
+        note_timestamps (deque)   – monotonic timestamps of note-on events
+    """
+
+    _SKIP_KEYWORDS = ("MusicianClock", "GestureInstrument")
+
+    def __init__(self):
+        self.available: bool = False
+        self.port_name: str = ""
+        self.note_timestamps: collections.deque[float] = collections.deque(maxlen=64)
+
+        midi_in = rtmidi.MidiIn()
+        ports = midi_in.get_ports()
+
+        chosen_idx = None
+        for i, name in enumerate(ports):
+            if not any(kw in name for kw in self._SKIP_KEYWORDS):
+                chosen_idx = i
+                self.port_name = name
+                break
+
+        if chosen_idx is None:
+            print("[MIDI IN] No hardware MIDI input port found.")
+            if ports:
+                print("[MIDI IN] Available ports:")
+                for name in ports:
+                    print(f"           {name}")
+            else:
+                print("[MIDI IN] (No MIDI ports visible at all.)")
+            midi_in.close_port()
+            del midi_in
+            return
+
+        self.available = True
+        self._midi_in = midi_in
+        self._midi_in.open_port(chosen_idx)
+        self._midi_in.ignore_types(sysex=True, timing=True, active_sense=True)
+        print(f"[MIDI IN] Listening on: {self.port_name}")
+
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+
+    def _loop(self):
+        """Poll for incoming MIDI messages and record note-on timestamps."""
+        while True:
+            msg_and_dt = self._midi_in.get_message()
+            if msg_and_dt is not None:
+                msg, _ = msg_and_dt
+                # Note-on: status byte 0x9n with velocity > 0
+                if msg and (msg[0] & 0xF0) == 0x90 and len(msg) >= 3 and msg[2] > 0:
+                    self.note_timestamps.append(time.monotonic())
+            else:
+                time.sleep(0.002)
+
+
+# ---------------------------------------------------------------------------
+# TempoRefiner
+# ---------------------------------------------------------------------------
+class TempoRefiner:
+    """
+    Analyzes a list of note-on timestamps using autocorrelation to find the
+    precise BPM, then blends it with the current head-nod BPM estimate.
+
+    Usage:
+        refiner = TempoRefiner()
+        refined = refiner.update(timestamps, current_bpm)
+        # returns float or None
+    """
+
+    def __init__(self):
+        self._last_run: float = 0.0       # monotonic time of last analysis
+        self._fired_once: bool = False    # has autocorr ever produced a result?
+
+    @property
+    def has_fired(self) -> bool:
+        return self._fired_once
+
+    def update(self, timestamps: list[float], current_bpm: float) -> float | None:
+        """
+        Run autocorrelation analysis on note timestamps.
+
+        Returns a blended BPM float, or None if:
+          - fewer than REFINER_MIN_NOTES timestamps supplied
+          - cooldown has not elapsed since last analysis
+          - confidence threshold not met
+        """
+        if len(timestamps) < REFINER_MIN_NOTES:
+            return None
+
+        now = time.monotonic()
+        if now - self._last_run < REFINER_COOLDOWN_S:
+            return None
+        self._last_run = now
+
+        # Convert to numpy array of milliseconds relative to first event
+        ts_ms = np.array(timestamps, dtype=np.float64)
+        ts_ms = (ts_ms - ts_ms[0]) * 1000.0  # ms, starting at 0
+
+        # Build all pairwise inter-onset intervals (IOIs)
+        iois = []
+        n = len(ts_ms)
+        for i in range(n):
+            for j in range(i + 1, n):
+                iois.append(ts_ms[j] - ts_ms[i])
+        iois = np.array(iois, dtype=np.float64)
+
+        # Candidate lags: BPM 40-240 in ms-per-beat
+        lag_max_ms = 60000.0 / BPM_MIN    # 1500 ms
+        lag_min_ms = 60000.0 / BPM_MAX    # 250 ms
+
+        lags = np.arange(lag_min_ms, lag_max_ms + REFINER_BIN_MS, REFINER_BIN_MS)
+        scores = np.zeros(len(lags), dtype=np.float64)
+
+        sigma2 = 2.0 * REFINER_SIGMA_MS ** 2
+
+        # Sparse autocorrelation: for each lag, sum gaussian weights over IOIs
+        for k, lag in enumerate(lags):
+            diffs = iois - lag
+            # Also consider multiples of the lag (up to 4x) that fall within IOIs
+            for mult in range(1, 5):
+                diffs_mult = iois - lag * mult
+                scores[k] += np.sum(np.exp(-(diffs_mult ** 2) / sigma2))
+
+        # Find best and second-best peaks (must be separated by at least 50 ms)
+        best_idx = int(np.argmax(scores))
+        best_score = scores[best_idx]
+        best_lag = lags[best_idx]
+
+        # Mask out neighbourhood of best to find second-best
+        mask_radius = int(50.0 / REFINER_BIN_MS)
+        masked = scores.copy()
+        lo = max(0, best_idx - mask_radius)
+        hi = min(len(masked), best_idx + mask_radius + 1)
+        masked[lo:hi] = 0.0
+        second_best_score = float(np.max(masked))
+
+        # Confidence check
+        if second_best_score <= 0 or best_score < REFINER_CONF_RATIO * second_best_score:
+            return None
+
+        # Convert winning lag to BPM
+        autocorr_bpm = float(np.clip(60000.0 / best_lag, BPM_MIN, BPM_MAX))
+
+        # Blend with current BPM
+        refined = REFINER_BLEND_CURR * current_bpm + REFINER_BLEND_AUTO * autocorr_bpm
+        refined = float(np.clip(refined, BPM_MIN, BPM_MAX))
+
+        self._fired_once = True
+        return refined
+
+
+# ---------------------------------------------------------------------------
 # Drawing helpers
 # ---------------------------------------------------------------------------
 def put_text_shadow(img, text: str, pos, scale=1.0,
@@ -239,8 +409,9 @@ def put_text_shadow(img, text: str, pos, scale=1.0,
 
 
 def draw_hud(frame, bpm: float, nod_flash: bool, clock_running: bool,
-             waiting: bool, nod_history: list[float], clock_started: bool = False):
-    """Overlay BPM, nod indicator, clock state, nod history dots."""
+             waiting: bool, nod_history: list[float], clock_started: bool = False,
+             midi_port_name: str = "", refiner_fired: bool = False):
+    """Overlay BPM, nod indicator, clock state, nod history dots, MIDI info."""
     h, w = frame.shape[:2]
 
     # Semi-transparent black bar at bottom
@@ -305,6 +476,27 @@ def draw_hud(frame, bpm: float, nod_flash: bool, clock_running: bool,
         else:
             cv2.circle(frame, (cx, cy), 9, (60, 60, 60), 2)
 
+    # MIDI IN + REFINE status — right side of bottom bar, small text
+    midi_label = f"MIDI IN: {midi_port_name}" if midi_port_name else "MIDI IN: none"
+    midi_color = (0, 220, 255) if midi_port_name else (120, 120, 120)
+
+    if refiner_fired:
+        refine_label = "REFINE: AUTO"
+        refine_color = (255, 220, 0)   # cyan-ish (BGR: yellow-cyan)
+    else:
+        refine_label = "REFINE: NOD ONLY"
+        refine_color = (120, 120, 120)
+
+    # Position: right-aligned in the bottom bar
+    right_col_x = w - 320
+    midi_y = h - bar_h + 120
+    refine_y = h - bar_h + 148
+
+    put_text_shadow(frame, midi_label, (right_col_x, midi_y),
+                    scale=0.55, color=midi_color, thickness=1)
+    put_text_shadow(frame, refine_label, (right_col_x, refine_y),
+                    scale=0.55, color=refine_color, thickness=1)
+
     # Key hints (top-right corner)
     hints = ["r=reset  s=stop/start  q=quit"]
     put_text_shadow(frame, hints[0], (w - 380, 25),
@@ -351,6 +543,10 @@ def main():
     # --- Detectors/trackers ---
     nod_detector = NodDetector()
     bpm_tracker  = BpmTracker()
+
+    # --- MIDI input + tempo refiner ---
+    midi_listener = MidiInputListener()
+    refiner = TempoRefiner()
 
     # --- State ---
     nod_timestamps: collections.deque[float] = collections.deque(maxlen=BPM_HISTORY)
@@ -414,6 +610,17 @@ def main():
                     clock_started = True
                     print(f"[INFO] Clock started at {bpm:.1f} BPM")
 
+        # --- MIDI input → autocorrelation BPM refinement ---
+        if midi_listener.available and len(midi_listener.note_timestamps) >= REFINER_MIN_NOTES:
+            refined = refiner.update(
+                list(midi_listener.note_timestamps),
+                bpm_tracker.current_bpm(),
+            )
+            if refined is not None:
+                clock.update_bpm(refined)
+                bpm_tracker._bpm = refined   # sync tracker
+                print(f"[REFINE] Autocorr BPM → {refined:.1f}")
+
         # --- Flash state ---
         now_mono = time.monotonic()
         nod_flash = now_mono < nod_flash_until
@@ -431,6 +638,8 @@ def main():
             waiting=waiting,
             nod_history=list(nod_timestamps),
             clock_started=clock_started,
+            midi_port_name=midi_listener.port_name if midi_listener.available else "",
+            refiner_fired=refiner.has_fired,
         )
 
         cv2.imshow("Musician BPM Clock", frame)
